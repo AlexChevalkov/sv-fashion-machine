@@ -214,38 +214,42 @@ def create_buffer_draft(post_text, channel_id, image_url=None):
         "Content-Type": "application/json"
     }
 
-    # Базовый input
-    input_data = {
-        "channelId": channel_id,
-        "content": {
-            "text": post_text
-        }
-    }
+    # Экранируем текст для GraphQL
+    safe_text = post_text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
-    # Добавляем фото если есть
+    # Добавляем медиа если есть фото
+    media_part = ""
     if image_url:
-        input_data["content"]["assets"] = [{"url": image_url}]
+        safe_url = image_url.replace('"', '\\"')
+        media_part = f'''assets: [{{ url: "{safe_url}", mediaType: image }}],'''
 
-    mutation = """
-    mutation CreateDraft($input: CreateDraftPostInput!) {
-        createDraftPost(input: $input) {
-            ... on Post {
-                id
-                text
-                status
-            }
-            ... on CoreAPIError {
+    mutation = f'''
+    mutation CreateDraftPost {{
+        createPost(input: {{
+            text: "{safe_text}",
+            channelId: "{channel_id}",
+            schedulingType: automatic,
+            mode: addToQueue,
+            saveToDraft: true,
+            {media_part}
+        }}) {{
+            ... on PostActionSuccess {{
+                post {{
+                    id
+                    text
+                }}
+            }}
+            ... on MutationError {{
                 message
-                type
-            }
-        }
-    }
-    """
+            }}
+        }}
+    }}
+    '''
 
     try:
         response = requests.post(
             url,
-            json={"query": mutation, "variables": {"input": input_data}},
+            json={"query": mutation},
             headers=headers
         )
         result = response.json()
