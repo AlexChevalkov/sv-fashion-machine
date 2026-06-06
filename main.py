@@ -19,7 +19,7 @@ RSS_FEEDS = [
 ]
 
 # Расписание: воскресенье=0, понедельник=1 ... суббота=6
-PUBLISH_DAYS = [0, 2, 3, 4]  # вс, ср, чт, пт
+PUBLISH_DAYS = [6, 2, 3, 4]  # вс=6, ср=2, чт=3, пт=4  # вс, ср, чт, пт
 
 # Время публикации (МСК = UTC+3)
 PUBLISH_TIME_UTC = "06:30"  # 9:30 МСК
@@ -209,8 +209,11 @@ def save_results(post, story):
 
 def should_run_today():
     """Проверяет нужно ли публиковать сегодня"""
+    # Если запущен вручную (MANUAL_RUN=true) — всегда публикуем
+    if os.environ.get("MANUAL_RUN") == "true":
+        return True
     today = datetime.now().weekday()
-    # В GitHub Actions weekday(): пн=0, вт=1, ср=2, чт=3, пт=4, сб=5, вс=6
+    # weekday(): пн=0, вт=1, ср=2, чт=3, пт=4, сб=5, вс=6
     return today in PUBLISH_DAYS
 
 
