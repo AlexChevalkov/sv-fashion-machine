@@ -287,6 +287,53 @@ def create_buffer_draft(post_text, channel_id, image_url=None):
         return None
 
 
+def post_to_telegram(post_text, image_url=None):
+    """Публикует пост в Telegram канал"""
+    if not TELEGRAM_BOT_TOKEN:
+        print("TELEGRAM_BOT_TOKEN не найден, пропускаю")
+        return None
+
+    try:
+        if image_url:
+            # Пост с фото
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL,
+                "photo": image_url,
+                "caption": post_text,
+                "parse_mode": "HTML"
+            }
+        else:
+            # Текстовый пост
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHANNEL,
+                "text": post_text,
+                "parse_mode": "HTML"
+            }
+
+        response = requests.post(url, json=payload, timeout=30)
+        result = response.json()
+
+        if result.get("ok"):
+            print("✅ Пост опубликован в Telegram!")
+        else:
+            print(f"⚠️ Ошибка Telegram: {result.get('description')}")
+            # Если ошибка parse_mode — пробуем без него
+            if "parse" in str(result.get('description', '')).lower():
+                payload.pop("parse_mode")
+                response2 = requests.post(url, json=payload, timeout=30)
+                result2 = response2.json()
+                if result2.get("ok"):
+                    print("✅ Пост опубликован в Telegram (без форматирования)!")
+                    return result2
+
+        return result
+    except Exception as e:
+        print(f"Ошибка публикации в Telegram: {e}")
+        return None
+
+
 def should_run_today():
     if os.environ.get("MANUAL_RUN") == "true":
         return True
@@ -464,6 +511,10 @@ def main():
             print("✅ Напоминание для сторис создано в Buffer!")
         else:
             print("⚠️ Не удалось создать напоминание для сторис")
+
+    # Публикуем в Telegram
+    print("Публикую в Telegram...")
+    post_to_telegram(post, image_url)
 
     print("Готово!")
 
