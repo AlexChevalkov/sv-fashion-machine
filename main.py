@@ -323,7 +323,40 @@ def main():
     image_url = best_article.get('image_url') if best_article else None
 
     if image_url:
-        print(f"Найдено фото: {image_url}")
+        # Проверяем размер изображения — Instagram максимум 5000px
+        try:
+            head = requests.head(image_url, timeout=5)
+            img_response = requests.get(image_url, timeout=10, stream=True)
+            img_response.raw.decode_content = True
+            from PIL import Image
+            import io
+            img_data = img_response.content
+            img = Image.open(io.BytesIO(img_data))
+            w, h = img.size
+            if w > 4000 or h > 4000:
+                print(f"Фото слишком большое ({w}x{h}px), изменяю размер...")
+                img.thumbnail((4000, 4000), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG', quality=85)
+                buf.seek(0)
+                # Загружаем на tmpfiles.org
+                upload = requests.post(
+                    "https://tmpfiles.org/api/v1/upload",
+                    files={"file": ("image.jpg", buf, "image/jpeg")},
+                    timeout=30
+                )
+                if upload.status_code == 200:
+                    url_data = upload.json()
+                    image_url = url_data.get("data", {}).get("url", "").replace("tmpfiles.org/", "tmpfiles.org/dl/")
+                    print(f"Изображение изменено и загружено: {image_url}")
+                else:
+                    print("Не удалось загрузить изображение, пост без фото")
+                    image_url = None
+            else:
+                print(f"Фото подходит ({w}x{h}px): {image_url}")
+        except Exception as e:
+            print(f"Ошибка обработки фото: {e}, пост без фото")
+            image_url = None
     else:
         print("Фото не найдено в RSS, пост будет без фото")
 
