@@ -11,14 +11,25 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BUFFER_ACCESS_TOKEN = os.environ["BUFFER_ACCESS_TOKEN"]
 
 RSS_FEEDS = [
+    # Международные
     "https://www.vogue.com/feed/rss",
     "https://www.businessoffashion.com/feed",
     "https://www.elle.com/rss/all.xml/",
     "https://www.dazeddigital.com/rss",
+    "https://www.harpersbazaar.com/rss/all.xml/",
+    "https://www.wwd.com/feed/",
+    "https://hypebeast.com/feed",
+    "https://www.highsnobiety.com/feed/",
+    # Русскоязычные
     "https://www.buro247.me/rss.xml",
+    "https://theblueprint.ru/rss",
+    "https://www.tatler.ru/rss",
 ]
 
-PUBLISH_DAYS = [6, 2, 3, 4]  # вс=6, ср=2, чт=3, пт=4
+PUBLISH_DAYS = list(range(7))  # все дни
+
+# Публикуем каждый день кроме субботы (5)
+PUBLISH_DAYS = [0, 1, 2, 3, 4, 6]  # все дни кроме субботы
 
 MASTER_PROMPT = """Ты помогаешь вести Instagram-блог @sv_fashionacademy — профессиональный блог о моде и стиле для русскоязычной аудитории.
 
