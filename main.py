@@ -325,11 +325,7 @@ def post_to_telegram(post_text, image_url=None):
         return None
 
     # Формируем превью для модерации
-    preview_header = "🔔 НОВЫЙ ПОСТ ДЛЯ КАНАЛА @yudashkin_academy
-
-Просмотри и перешли в канал если всё ок 👇
-
-"
+    preview_header = "НОВЫЙ ПОСТ ДЛЯ КАНАЛА @yudashkin_academy\n\nПросмотри и перешли в канал если всё ок\n\n"
     preview_text = preview_header + post_text
 
     result = send_telegram(TELEGRAM_ADMIN_ID, preview_text, image_url)
@@ -337,8 +333,7 @@ def post_to_telegram(post_text, image_url=None):
     if result and result.get("ok"):
         print("✅ Превью отправлено тебе в Telegram для проверки!")
         # Отправляем подсказку
-        hint = "☝️ Если пост подходит — нажми Forward и отправь в @yudashkin_academy
-Если нет — просто удали это сообщение."
+        hint = "Если пост подходит — нажми Forward и отправь в @yudashkin_academy. Если нет — просто удали."
         send_telegram(TELEGRAM_ADMIN_ID, hint)
     else:
         print(f"⚠️ Ошибка отправки превью: {result}")
