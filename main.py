@@ -293,39 +293,44 @@ def post_to_telegram(post_text, image_url=None):
         print("TELEGRAM_BOT_TOKEN не найден, пропускаю")
         return None
 
+    # Убираем markdown символы которые могут сломать отправку
+    clean_text = post_text.replace("**", "").replace("__", "").replace("`", "")
+    # Обрезаем до лимита Telegram (caption max 1024, message max 4096)
+    max_len = 1024 if image_url else 4096
+    if len(clean_text) > max_len:
+        clean_text = clean_text[:max_len-3] + "..."
+
     try:
         if image_url:
-            # Пост с фото
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL,
                 "photo": image_url,
-                "caption": post_text,
-                "parse_mode": "HTML"
+                "caption": clean_text
             }
         else:
-            # Текстовый пост
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHANNEL,
-                "text": post_text,
-                "parse_mode": "HTML"
+                "text": clean_text
             }
 
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(api_url, json=payload, timeout=30)
         result = response.json()
 
         if result.get("ok"):
             print("✅ Пост опубликован в Telegram!")
         else:
             print(f"⚠️ Ошибка Telegram: {result.get('description')}")
-            # Если ошибка parse_mode — пробуем без него
-            if "parse" in str(result.get('description', '')).lower():
-                payload.pop("parse_mode")
-                response2 = requests.post(url, json=payload, timeout=30)
+            # Если ошибка с фото — пробуем без него
+            if image_url and not result.get("ok"):
+                print("Пробую отправить без фото...")
+                api_url2 = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload2 = {"chat_id": TELEGRAM_CHANNEL, "text": clean_text}
+                response2 = requests.post(api_url2, json=payload2, timeout=30)
                 result2 = response2.json()
                 if result2.get("ok"):
-                    print("✅ Пост опубликован в Telegram (без форматирования)!")
+                    print("✅ Пост опубликован в Telegram (без фото)!")
                     return result2
 
         return result
