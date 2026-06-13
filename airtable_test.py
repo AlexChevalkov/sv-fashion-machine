@@ -54,9 +54,7 @@ table_encoded = quote(AIRTABLE_TABLE_NAME, safe="")
 create_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
 
 payload = {
-    "fields": {
-        "Title": f"DIAG TEST: {datetime.now().isoformat()}"
-    }
+    "fields": {}
 }
 
 create_response = requests.post(create_url, headers=headers, json=payload)
