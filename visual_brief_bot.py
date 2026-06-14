@@ -249,6 +249,9 @@ Source URL:
 - Reels должны быть рассчитаны на рост охвата: сильные первые 2 секунды, ясный визуальный конфликт, 20-40 секунд.
 - Carousel должна давать сохранения: структура, выводы, понятные слайды.
 - Krea Prompt Pack должен быть пригоден для работы в Krea: отдельно image prompts, video prompts, cover prompts, style rules.
+- Krea Prompt Pack должен быть конкретным, но компактным: максимум 3000 знаков.
+- Render Notes максимум 1000 знаков.
+- Не пиши длинные референс-листы и длинные объяснения.
 - Не полагайся на точное написание текста внутри AI-изображений. Текст лучше как overlay.
 - Для Krea учитывай:
   - Nano Banana / Krea Image — для image editing, fashion frames, carousel cover, image-led slides.
@@ -284,12 +287,12 @@ Krea Model Recommendation: "Krea Image", "Nano Banana", "Kling", "Runway", "Veo 
 """
 
     message = client.messages.create(
-        model=MODEL,
-        max_tokens=2600,
-        temperature=0.35,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    model=MODEL,
+    max_tokens=5000,
+    temperature=0.25,
+    system=system_prompt,
+    messages=[{"role": "user", "content": user_prompt}],
+)
 
     response_text = message.content[0].text
 
