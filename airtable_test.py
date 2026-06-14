@@ -190,11 +190,13 @@ def source_role(url: str) -> str:
     if any(d in domain for d in CONTEXT_DOMAINS):
         return "context_source"
 
+    if any(d in domain for d in REGIONAL_DOMAINS):
+        return "regional_source"
+
     if any(d in domain for d in MAINSTREAM_DOMAINS):
         return "mainstream_source"
 
     return "other_source"
-
 
 def fetch_existing_content() -> tuple[set[str], set[str], list[str]]:
     existing_urls = set()
@@ -259,10 +261,107 @@ def fetch_existing_content() -> tuple[set[str], set[str], list[str]]:
 
     return existing_urls, existing_titles, recent_titles[:50]
 
+def is_probably_article_link(url: str, title: str) -> bool:
+    if not url or not title:
+        return False
 
+    title = title.strip()
+    lower_url = url.lower()
+
+    if len(title) < 18 or len(title) > 180:
+        return False
+
+    bad_fragments = [
+        "privacy",
+        "cookie",
+        "terms",
+        "contact",
+        "about",
+        "careers",
+        "advertise",
+        "newsletter",
+        "subscribe",
+        "login",
+        "account",
+        "signin",
+        "sign-in",
+        "sitemap",
+        "rss",
+        "facebook.com",
+        "instagram.com",
+        "youtube.com",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+        "linkedin.com",
+        "pinterest.com",
+        "apps.apple.com",
+        "play.google.com",
+    ]
+
+    if any(fragment in lower_url for fragment in bad_fragments):
+        return False
+
+    return True
+
+
+def fetch_page_articles() -> list[dict]:
+    page_articles = []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 SVFashionBot/2.0"
+    }
+
+    for source in SOURCE_PAGES:
+        source_name = source["name"]
+        page_url = source["url"]
+
+        try:
+            response = requests.get(page_url, headers=headers, timeout=20)
+
+            if response.status_code != 200:
+                print(f"Page source skipped: {source_name} | status {response.status_code}")
+                continue
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            count = 0
+
+            for link_tag in soup.find_all("a"):
+                title = clean_html(link_tag.get_text(" ", strip=True))
+                href = link_tag.get("href", "")
+
+                if not href:
+                    continue
+
+                full_url = urljoin(page_url, href)
+
+                if not is_probably_article_link(full_url, title):
+                    continue
+
+                page_articles.append(
+                    {
+                        "source": source_name,
+                        "title": title,
+                        "summary": f"Материал найден на региональном/контекстном источнике: {source_name}. Тема требует редакционной оценки, а не пересказа.",
+                        "link": full_url,
+                        "role": source_role(full_url),
+                    }
+                )
+
+                count += 1
+
+                if count >= 6:
+                    break
+
+        except Exception as error:
+            print(f"Page source error for {source_name}: {error}")
+
+    return page_articles
 def fetch_articles() -> list[dict]:
     articles = []
 
+    # 1. RSS layer
     for feed_url in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_url)
@@ -289,17 +388,26 @@ def fetch_articles() -> list[dict]:
         except Exception as error:
             print(f"RSS error for {feed_url}: {error}")
 
+    # 2. Page scraping layer for regional/context sources
+    page_articles = fetch_page_articles()
+    articles.extend(page_articles)
+
+    # 3. Dedupe by normalized URL
     seen = set()
     unique_articles = []
 
     for article in articles:
         key = normalize_url(article["link"])
+
         if key in seen:
             continue
+
         seen.add(key)
         unique_articles.append(article)
 
-    return unique_articles[:60]
+    print(f"RSS + page candidates collected: {len(unique_articles)}")
+
+    return unique_articles[:90]
 
 
 def filter_new_articles(
@@ -395,6 +503,12 @@ def select_editorial_topic(
 
 Не отдавай автоматический приоритет Vogue, WWD, BoF и другим самым известным источникам.
 Большую громкую новость можно выбрать только если есть неожиданный экспертный угол.
+Особый бонус получают:
+- regional_source: Китай, Япония, Индия, Ближний Восток, Латинская Америка, локальные fashion-рынки;
+- context_source: law, business, museums, archives, fashion culture, luxury strategy.
+
+Если mainstream_source и regional_source равны по силе, выбирай regional_source.
+Цель — находить темы, которые подписчик вряд ли увидит везде, но которые помогают понять моду глубже.
 
 Предпочитай темы, где можно показать:
 - коды и днк бренда;
