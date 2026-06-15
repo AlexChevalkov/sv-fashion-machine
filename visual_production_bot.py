@@ -1,1351 +1,860 @@
 import os
 import re
 import json
+import math
 import time
-import traceback
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import quote
+from typing import Any, Dict, List, Tuple
 
 import requests
 import anthropic
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 
 
-# ============================================================
+# =========================================================
 # ENV
-# ============================================================
+# =========================================================
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 KREA_API_KEY = os.environ["KREA_API_KEY"]
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
-CONTENT_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Content Inbox")
-VISUAL_TABLE_NAME = os.environ.get("AIRTABLE_VISUAL_TABLE_NAME", "Visual Jobs")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+AIRTABLE_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Visual Jobs")
+AIRTABLE_VIEW_NAME = os.environ.get("AIRTABLE_VIEW_NAME", "Queued Visual Jobs")
 
-KREA_API_BASE = "https://api.krea.ai"
+BRAND_NAME = os.environ.get("BRAND_NAME", "SV FASHION MEDIA")
+INSTAGRAM_HANDLE = os.environ.get("INSTAGRAM_HANDLE", "@sv_fashionacademy")
 
-OUTPUT_DIR = Path("outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "outputs"))
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-W, H = 1080, 1350
-FINAL_SLIDES = 3
-BODY_IMAGES_TO_RENDER = 2
+# Krea endpoints
+# Если у тебя в текущем тестовом коде другие endpoint'ы — просто замени значения в secrets/env.
+KREA_CREATE_URL = os.environ.get("KREA_CREATE_URL", "https://api.krea.ai/v1/images")
+KREA_JOB_URL_TEMPLATE = os.environ.get("KREA_JOB_URL_TEMPLATE", "https://api.krea.ai/v1/images/{job_id}")
+KREA_MODEL = os.environ.get("KREA_MODEL", "k2")
+KREA_ASPECT_RATIO = os.environ.get("KREA_ASPECT_RATIO", "4:5")
 
+# Typography / rendering
+CANVAS_W = 1080
+CANVAS_H = 1350
+MAX_SLIDES = 7
+MIN_SLIDES = 5
 
-# ============================================================
-# SV FASHION MEDIA — CAROUSEL STYLE SYSTEM v1
-# ============================================================
+# Fonts
+FONT_REGULAR = os.environ.get(
+    "FONT_REGULAR",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"
+)
+FONT_BOLD = os.environ.get(
+    "FONT_BOLD",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
+)
 
-STYLE_CONFIG = {
-    "fonts": {
-        "regular_candidates": [
-            "assets/fonts/RobotoCondensed-Regular.ttf",
-            "assets/fonts/IBMPlexSansCondensed-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ],
-        "bold_candidates": [
-            "assets/fonts/RobotoCondensed-Bold.ttf",
-            "assets/fonts/IBMPlexSansCondensed-Medium.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        ],
-    },
-    "colors": {
-        "white": (255, 255, 255, 255),
-        "meta": (255, 255, 255, 175),
-        "meta_soft": (255, 255, 255, 135),
-        "plate": (0, 0, 0, int(255 * 0.24)),
-    },
-    "meta": {
-        "x": 78,
-        "y": 66,
-        "brand": "SV FASHION MEDIA",
-        "brand_size": 24,
-        "number_size": 22,
-        "handle_size": 22,
-        "tracking": 4,
-        "line_y": 126,
-        "line_width": 96,
-        "line_height": 1,
-        "handle_y": 1248,
-    },
-    "cover": {
-        "x": 78,
-        "y": 520,
-        "width": 690,
-        "font_size": 56,
-        "min_font_size": 40,
-        "line_height": 1.12,
-        "max_lines": 4,
-        "bold": False,
-        "plate_padding_x": 28,
-        "plate_padding_y": 20,
-    },
-    "body": {
-        "x": 78,
-        "y": 830,
-        "width": 720,
-        "font_size": 42,
-        "min_font_size": 30,
-        "line_height": 1.16,
-        "max_lines": 4,
-        "bold": False,
-        "plate_padding_x": 28,
-        "plate_padding_y": 20,
-    },
-}
+# Statuses
+STATUS_QUEUED = "Queued"
+STATUS_BRIEF_READY = "Brief Ready"
+STATUS_RENDERING = "Rendering"
+STATUS_NEEDS_REVIEW = "Needs Visual Review"
+STATUS_ERROR = "Error"
 
 
-# ============================================================
-# AIRTABLE
-# ============================================================
+# =========================================================
+# HELPERS
+# =========================================================
 
-def airtable_table_url(table_name: str) -> str:
-    table_encoded = quote(table_name, safe="")
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
-
-
-def airtable_headers() -> dict:
-    return {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json",
-    }
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_queued_visual_job() -> dict | None:
-    url = airtable_table_url(VISUAL_TABLE_NAME)
-
-    params = {
-        "pageSize": 1,
-        "filterByFormula": (
-            "OR("
-            "{Visual Status} = 'Queued', "
-            "{Visual Status} = 'queued'"
-            ")"
-        ),
-    }
-
-    response = requests.get(
-        url,
-        headers=airtable_headers(),
-        params=params,
-        timeout=30,
-    )
-
-    print("Read Visual Jobs status:", response.status_code)
-    print("Read Visual Jobs preview:", response.text[:1200])
-
-    if response.status_code != 200:
-        raise RuntimeError("Could not read Visual Jobs")
-
-    records = response.json().get("records", [])
-
-    if not records:
-        print("No Queued Visual Jobs found.")
-        return None
-
-    return records[0]
+def safe_get(fields: Dict[str, Any], key: str, default: str = "") -> str:
+    value = fields.get(key, default)
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return ", ".join(str(x) for x in value if x is not None)
+    return str(value)
 
 
-def update_visual_job_fields(record_id: str, fields: dict) -> None:
-    url = f"{airtable_table_url(VISUAL_TABLE_NAME)}/{record_id}"
-
-    payload = {
-        "fields": fields,
-        "typecast": True,
-    }
-
-    response = requests.patch(
-        url,
-        headers=airtable_headers(),
-        json=payload,
-        timeout=30,
-    )
-
-    print("Update Visual Job status:", response.status_code)
-    print("Update Visual Job response:", response.text[:1200])
-
-    if response.status_code not in [200, 201, 202]:
-        raise RuntimeError("Could not update Visual Job")
+def clamp_slide_count(value: Any) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = 6
+    return max(MIN_SLIDES, min(MAX_SLIDES, n))
 
 
-def append_render_notes(existing: str, addition: str) -> str:
-    existing = existing or ""
-    addition = addition or ""
-
-    if existing.strip():
-        return f"{existing.strip()}\n\n---\n\n{addition.strip()}"
-
-    return addition.strip()
-
-
-def normalize_title(title: str) -> str:
-    title = (title or "").lower().strip()
-    title = re.sub(r"[^\w\sа-яА-ЯёЁ]", " ", title)
-    title = re.sub(r"\s+", " ", title)
-    return title
-
-
-def fetch_content_posts() -> list[dict]:
-    url = airtable_table_url(CONTENT_TABLE_NAME)
-
-    params = [
-        ("pageSize", "100"),
-        ("fields[]", "Title"),
-        ("fields[]", "HOOK"),
-        ("fields[]", "Visual Headline"),
-        ("fields[]", "Final Caption"),
-        ("fields[]", "Raw Text"),
-        ("fields[]", "Rubric"),
-        ("fields[]", "Source URL"),
-    ]
-
-    response = requests.get(
-        url,
-        headers=airtable_headers(),
-        params=params,
-        timeout=30,
-    )
-
-    print("Read Content Inbox status:", response.status_code)
-
-    if response.status_code != 200:
-        print("Content Inbox read failed. Using Visual Job only.")
-        print(response.text[:1000])
-        return []
-
-    return response.json().get("records", [])
-
-
-def find_matching_post(source_post_title: str) -> dict:
-    posts = fetch_content_posts()
-    target = normalize_title(source_post_title)
-
-    for record in posts:
-        fields = record.get("fields", {})
-        title = fields.get("Title", "")
-
-        if normalize_title(title) == target:
-            print("Matched Content Inbox post:", title)
-            return fields
-
-    print("No exact Content Inbox match. Using Visual Job data only.")
-    return {}
-
-
-# ============================================================
-# CLAUDE VISUAL BRIEF
-# ============================================================
-
-def extract_json(text: str) -> dict:
+def extract_json(text: str) -> Dict[str, Any]:
     text = text.strip()
-
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
 
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    start = text.find("{")
-    end = text.rfind("}")
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in model response:\n{text}")
 
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError(
-            "No complete JSON object found in Claude response.\n"
-            f"Response preview:\n{text[:2000]}"
-        )
-
-    return json.loads(text[start:end + 1])
+    return json.loads(match.group(0))
 
 
-def generate_visual_brief(job_fields: dict, post_fields: dict) -> dict:
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def shorten(text: str, limit: int = 600) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+# =========================================================
+# AIRTABLE
+# =========================================================
+
+def airtable_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def airtable_base_url() -> str:
+    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{requests.utils.quote(AIRTABLE_TABLE_NAME, safe='')}"
+
+
+def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
+    """
+    Берём jobs со статусом Queued.
+    Лучше иметь отдельный view Queued Visual Jobs,
+    но если view нет — можно читать всю таблицу и фильтровать формулой.
+    """
+    url = airtable_base_url()
+    params = {
+        "maxRecords": limit,
+        "view": AIRTABLE_VIEW_NAME,
+    }
+
+    response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
+    print("Read Visual Jobs status:", response.status_code)
+    print("Read Visual Jobs preview:", shorten(response.text, 1200))
+
+    response.raise_for_status()
+    data = response.json()
+    records = data.get("records", [])
+
+    if not records:
+        # fallback: formula query
+        params = {
+            "maxRecords": limit,
+            "filterByFormula": "{Visual Status}='Queued'"
+        }
+        response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
+        print("Fallback read status:", response.status_code)
+        print("Fallback read preview:", shorten(response.text, 1200))
+        response.raise_for_status()
+        data = response.json()
+        records = data.get("records", [])
+
+    return records
+
+
+def update_airtable_record(record_id: str, fields: Dict[str, Any]) -> None:
+    url = f"{airtable_base_url()}/{record_id}"
+    payload = {"fields": fields}
+    response = requests.patch(url, headers=airtable_headers(), json=payload, timeout=30)
+    print("Update Visual Job status:", response.status_code)
+    print("Update Visual Job preview:", shorten(response.text, 1200))
+    response.raise_for_status()
+
+
+def build_output_links_text(raw_items: List[Dict[str, str]], assembled_paths: List[str]) -> str:
+    lines = []
+    lines.append(f"Generated at: {now_iso()}")
+    lines.append("")
+
+    lines.append("Krea raw images:")
+    for item in raw_items:
+        slide_num = item["slide"]
+        url = item["url"]
+        job_id = item["job_id"]
+        lines.append(f"Slide {slide_num}: {url} | job_id: {job_id}")
+
+    lines.append("")
+    lines.append("Assembled local files:")
+    for path in assembled_paths:
+        lines.append(path)
+
+    return "\n".join(lines)
+
+
+# =========================================================
+# SOURCE CONTEXT
+# =========================================================
+
+def build_source_context(fields: Dict[str, Any]) -> str:
+    """
+    Собираем максимум полезного контекста из Visual Jobs.
+    Если каких-то полей нет — ничего страшного.
+    """
+
+    source_post_title = safe_get(fields, "Source Post Title")
+    source_post_text = safe_get(fields, "Source Post Text")
+    source_final_caption = safe_get(fields, "Source Final Caption")
+    source_raw_text = safe_get(fields, "Source Raw Text")
+    source_hook = safe_get(fields, "Source Hook")
+    source_url = safe_get(fields, "Source URL")
+    chosen_format = safe_get(fields, "Chosen Format", safe_get(fields, "Format", "Carousel"))
+    visual_mode = safe_get(fields, "Visual Mode", "Hybrid")
+    job_title = safe_get(fields, "Job Title", "Visual Production Job")
+
+    blocks = [
+        f"Job Title: {job_title}",
+        f"Chosen Format: {chosen_format}",
+        f"Visual Mode: {visual_mode}",
+        f"Source Post Title: {source_post_title}",
+        f"Source Hook: {source_hook}",
+        f"Source Post Text: {source_post_text}",
+        f"Source Final Caption: {source_final_caption}",
+        f"Source Raw Text: {source_raw_text}",
+        f"Source URL: {source_url}",
+    ]
+
+    return "\n".join(block for block in blocks if block.strip())
+
+
+# =========================================================
+# CLAUDE / BRIEF GENERATION
+# =========================================================
+
+def generate_visual_brief(record: Dict[str, Any]) -> Dict[str, Any]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    source_post_title = job_fields.get("Source Post Title", "")
-    job_title = job_fields.get("Job Title", "")
-    chosen_format = (
-        job_fields.get("Chosen Format")
-        or job_fields.get("Format")
-        or "Carousel"
-    )
-    visual_mode = job_fields.get("Visual Mode", "Hybrid")
+    fields = record["fields"]
+    source_context = build_source_context(fields)
 
-    post_title = post_fields.get("Title", source_post_title)
-    hook = post_fields.get("HOOK", job_fields.get("Visual Hook", ""))
-    visual_headline = post_fields.get("Visual Headline", "")
-    final_caption = post_fields.get("Final Caption", "")
-    raw_text = post_fields.get("Raw Text", "")
-    rubric = post_fields.get("Rubric", "")
-    source_url = post_fields.get("Source URL", "")
+    system_prompt = f"""
+Ты — Visual Editor и Creative Director для {BRAND_NAME}.
 
-    system_prompt = """
-Ты — visual strategist и арт-директор fashion media.
+Контекст бренда:
+- Умное fashion-медиа
+- Не глянец ради глянца, а editorial intelligence
+- Минимализм, дистанция, ощущение premium
+- Визуал должен ощущаться как fashion editorial, not stock
 
-Проект:
-SV Fashion Media / @sv_fashionacademy
+Твоя задача:
+1. Создать visual brief для одного поста
+2. Сразу спроектировать карусель 5–7 слайдов
+3. Дать Krea-ready prompts для каждого слайда
 
-Позиция:
-Не тренды. Контекст моды.
-Архивы, показы, бренды, вкус, индустрия.
+ЖЁСТКИЕ ПРАВИЛА:
+- Для карусели всегда выбирай от 5 до 7 слайдов
+- Делай не механические 7, а столько, сколько действительно нужно по смыслу
+- Слайд 1 — cover
+- Последний слайд — чёткий editorial takeaway / финальная мысль
+- Каждый слайд должен содержать КОРОТКИЙ текст
+- Текст для слайда должен быть типографически удобным:
+  - максимум 2 короткие строки
+  - максимум примерно 12 слов в строке
+  - не писать длинные абзацы
+- Первый слайд: короткий cover headline, 2–5 слов
+- Body slides: короткие ясные мысли, не caption-length
 
-Задача:
-Сделать visual brief для карусели Instagram в гибридном стиле:
-fashion-media intelligence + art/image-driven visual appeal.
+Правила визуального языка для Krea:
+- The object must look like a deliberate fashion editorial symbol, not a random product still life.
+- Composition should feel like a magazine cover background, with clear negative space reserved for typography.
+- cold editorial light
+- matte surfaces
+- stone / linen / paper / plaster textures
+- quiet premium mood
+- no people unless conceptually necessary
+- no stock photo feel
+- no glossy catalogue look
+- no visual clutter
+- no text inside the generated image
 
-Тон:
-умно, сухо, премиально, без глянцевой восторженности.
-Не делать случайную красивость.
-Не делать stock-photo fashion.
-Не делать Canva-постер.
-
-Пиши по-русски, но Krea prompts пиши на английском.
+Если тема слабая для карусели, всё равно выстрой её так, чтобы структура была сильной:
+hook → contrast → explanation → implication → final line
 """
 
     user_prompt = f"""
-Данные Visual Job:
+Вот контекст исходного поста:
 
-Job Title: {job_title}
-Source Post Title: {source_post_title}
-Chosen Format: {chosen_format}
-Visual Mode: {visual_mode}
+{source_context}
 
-Данные исходного поста:
-
-Title: {post_title}
-Rubric: {rubric}
-HOOK: {hook}
-Visual Headline: {visual_headline}
-
-Final Caption:
-{final_caption}
-
-Raw Text:
-{raw_text}
-
-Source URL:
-{source_url}
-
-Сделай production-ready Visual Brief для карусели.
-
-Правила:
-- Итоговая карусель v1 = 3 слайда: cover + 2 body slides.
-- Slide Copy должен быть коротким.
-- Каждый слайд: 1-2 короткие смысловые фразы.
-- Не перегружай текстом.
-- Krea Prompt Pack должен быть компактным, но конкретным.
-- Krea prompts должны быть physical, visual, production-ready.
-- Не проси Krea писать текст в изображении.
-- Фоны должны оставлять место для типографики.
-
-Krea Prompt Pack должен содержать строго такие секции:
-STYLE RULES:
-NEGATIVE PROMPTS:
-COVER IMAGE:
-CAROUSEL IMAGES:
-Slide 2:
-Slide 3:
-
-Верни строго валидный JSON без markdown.
+Верни СТРОГО валидный JSON.
+Без markdown. Без пояснений.
 
 Схема:
 {{
-  "Visual Hook": "короткая визуальная идея",
-  "Visual Concept": "общее арт-директорское описание",
-  "Visual Mode": "Hybrid",
-  "Carousel Cover": "короткий cover title",
-  "Slide Count": 3,
-  "Slide Structure": "структура 3 слайдов",
-  "Slide Copy": "Слайд 1: ... Слайд 2: ... Слайд 3: ...",
-  "Krea Prompt Pack": "STYLE RULES: ... NEGATIVE PROMPTS: ... COVER IMAGE: ... CAROUSEL IMAGES: Slide 2: ... Slide 3: ...",
-  "Krea Model Recommendation": "Manual Choice",
-  "Render Notes": "краткие производственные заметки"
+  "job_title": "короткое название visual job",
+  "chosen_format": "Carousel" или "Reel + Carousel",
+  "visual_mode": "Hybrid" или другое",
+  "visual_hook": "короткий hook для visual brief",
+  "visual_concept": "5-10 предложений про общую визуальную систему",
+  "reel_hook": "короткий reel hook",
+  "reel_duration": "30 sec",
+  "reel_script": "короткий reel script",
+  "shot_list": "список сцен для reel",
+  "on_screen_text": "какие фразы поверх видео",
+  "carousel_cover": "заголовок обложки, 2-5 слов",
+  "slide_count": 5,
+  "slide_texts": [
+    "Слайд 1 текст",
+    "Слайд 2 текст",
+    "Слайд 3 текст"
+  ],
+  "krea_model_recommendation": "Krea Image / Nano Banana / Manual Choice",
+  "render_notes": "технические примечания по рендеру и монтажу",
+  "krea_prompt_pack": "общие style rules и negative prompts",
+  "krea_prompts": [
+    "prompt for slide 1",
+    "prompt for slide 2",
+    "prompt for slide 3"
+  ]
 }}
+
+Требования:
+- slide_count от 5 до 7
+- slide_texts длиной ровно slide_count
+- slide_texts[0] должен смыслово совпадать с carousel_cover
+- krea_prompts длиной ровно slide_count
+- slide_texts должны быть короткими, пригодными для хорошей типографики
+- не делай длинных абзацев в slide_texts
 """
 
     message = client.messages.create(
-        model=MODEL,
-        max_tokens=4200,
-        temperature=0.25,
+        model=ANTHROPIC_MODEL,
+        max_tokens=3000,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
 
     response_text = message.content[0].text
-
-    print("\n=== Claude Visual Brief raw response ===")
+    print("Claude brief raw response:")
     print(response_text)
 
     brief = extract_json(response_text)
 
     required = [
-        "Visual Hook",
-        "Visual Concept",
-        "Visual Mode",
-        "Carousel Cover",
-        "Slide Count",
-        "Slide Structure",
-        "Slide Copy",
-        "Krea Prompt Pack",
-        "Krea Model Recommendation",
-        "Render Notes",
+        "job_title",
+        "chosen_format",
+        "visual_mode",
+        "visual_hook",
+        "visual_concept",
+        "reel_hook",
+        "reel_duration",
+        "reel_script",
+        "shot_list",
+        "on_screen_text",
+        "carousel_cover",
+        "slide_count",
+        "slide_texts",
+        "krea_model_recommendation",
+        "render_notes",
+        "krea_prompt_pack",
+        "krea_prompts",
     ]
+    for key in required:
+        if key not in brief:
+            raise ValueError(f"Claude response missing key: {key}")
 
-    for field in required:
-        if field not in brief:
-            raise ValueError(f"Missing field from Claude response: {field}")
+    brief["slide_count"] = clamp_slide_count(brief["slide_count"])
 
-    brief["Visual Mode"] = brief.get("Visual Mode") or "Hybrid"
-    brief["Slide Count"] = 3
-    brief["Krea Model Recommendation"] = "Manual Choice"
+    if not isinstance(brief["slide_texts"], list):
+        raise ValueError("slide_texts must be a list")
+    if not isinstance(brief["krea_prompts"], list):
+        raise ValueError("krea_prompts must be a list")
+
+    # Нормализуем длины
+    slide_texts = [str(x).strip() for x in brief["slide_texts"] if str(x).strip()]
+    krea_prompts = [str(x).strip() for x in brief["krea_prompts"] if str(x).strip()]
+
+    # Если Claude вернул меньше — дополним
+    while len(slide_texts) < brief["slide_count"]:
+        slide_texts.append("EDITORIAL THOUGHT")
+
+    while len(krea_prompts) < brief["slide_count"]:
+        idx = len(krea_prompts) + 1
+        fallback_prompt = (
+            f"{brief['krea_prompt_pack']} "
+            f"Slide {idx}. Editorial luxury still image with clear negative space, "
+            f"aligned with the theme: {slide_texts[idx - 1]}"
+        )
+        krea_prompts.append(fallback_prompt)
+
+    brief["slide_texts"] = slide_texts[:brief["slide_count"]]
+    brief["krea_prompts"] = krea_prompts[:brief["slide_count"]]
 
     return brief
 
 
-# ============================================================
-# KREA
-# ============================================================
+def format_slide_copy_for_airtable(slide_texts: List[str]) -> str:
+    lines = []
+    for idx, text in enumerate(slide_texts, start=1):
+        lines.append(f"Slide {idx}: {text}")
+    return "\n".join(lines)
 
-def krea_headers() -> dict:
+
+def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "Job Title": brief["job_title"],
+        "Chosen Format": brief["chosen_format"],
+        "Format": brief["chosen_format"],
+        "Visual Mode": brief["visual_mode"],
+        "Visual Hook": brief["visual_hook"],
+        "Visual Concept": brief["visual_concept"],
+        "Reel Hook": brief["reel_hook"],
+        "Reel Duration": brief["reel_duration"],
+        "Reel Script": brief["reel_script"],
+        "Shot List": brief["shot_list"],
+        "On-screen Text": brief["on_screen_text"],
+        "Carousel Cover": brief["carousel_cover"],
+        "Slide Count": brief["slide_count"],
+        "Slide Copy": format_slide_copy_for_airtable(brief["slide_texts"]),
+        "Krea Prompt Pack": brief["krea_prompt_pack"],
+        "Krea Model Recommendation": brief["krea_model_recommendation"],
+        "Render Notes": brief["render_notes"],
+        "Visual Status": STATUS_BRIEF_READY,
+    }
+
+
+# =========================================================
+# KREA
+# =========================================================
+
+def krea_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {KREA_API_KEY}",
         "Content-Type": "application/json",
     }
 
 
-def create_krea_image_job(prompt: str) -> str:
-    url = f"{KREA_API_BASE}/generate/image/krea/krea-2/medium"
-
+def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) -> str:
     payload = {
-        "prompt": prompt[:4000],
-        "aspect_ratio": "4:5",
-        "resolution": "1K",
-        "creativity": "low",
+        "model": KREA_MODEL,
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "num_images": 1,
     }
 
     response = requests.post(
-        url,
+        KREA_CREATE_URL,
         headers=krea_headers(),
         json=payload,
         timeout=60,
     )
 
-    print("Create Krea image job status:", response.status_code)
-    print("Create Krea image job response:", response.text[:1500])
-
-    if response.status_code not in [200, 201, 202]:
-        raise RuntimeError("Krea image job creation failed")
+    print("Create Krea job status:", response.status_code)
+    print("Create Krea job preview:", shorten(response.text, 1200))
+    response.raise_for_status()
 
     data = response.json()
     job_id = data.get("job_id")
-
     if not job_id:
-        raise RuntimeError("No job_id returned from Krea")
+        raise RuntimeError(f"Krea did not return job_id: {data}")
 
     return job_id
 
 
-def wait_for_krea_job(job_id: str, max_wait_seconds: int = 360) -> dict:
-    url = f"{KREA_API_BASE}/jobs/{job_id}"
+def poll_krea_job(job_id: str, max_wait_seconds: int = 240) -> str:
+    job_url = KREA_JOB_URL_TEMPLATE.format(job_id=job_id)
     started = time.time()
 
-    while True:
-        response = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {KREA_API_KEY}"},
-            timeout=60,
-        )
-
-        print("Poll status:", response.status_code)
-        print("Poll response preview:", response.text[:1000])
-
-        if response.status_code != 200:
-            raise RuntimeError("Krea job polling failed")
+    while time.time() - started < max_wait_seconds:
+        response = requests.get(job_url, headers=krea_headers(), timeout=30)
+        print("Poll Krea status:", response.status_code)
+        print("Poll Krea preview:", shorten(response.text, 1200))
+        response.raise_for_status()
 
         data = response.json()
         status = data.get("status")
 
-        print("Krea job status:", status)
-
         if status == "completed":
-            return data
+            result = data.get("result", {})
+            urls = result.get("urls", [])
+            if urls:
+                return urls[0]
+            raise RuntimeError(f"Krea job completed but no image URL found: {data}")
 
-        if status in ["failed", "cancelled", "canceled"]:
+        if status in {"failed", "cancelled"}:
             raise RuntimeError(f"Krea job failed: {data}")
 
-        if time.time() - started > max_wait_seconds:
-            raise TimeoutError("Krea job timed out")
+        time.sleep(4)
 
-        time.sleep(5)
-
-
-def get_image_url(job_data: dict) -> str:
-    result = job_data.get("result") or {}
-    urls = result.get("urls") or []
-
-    if not urls:
-        raise RuntimeError(f"No image URLs found in Krea job result: {job_data}")
-
-    return urls[0]
+    raise TimeoutError(f"Krea job timed out: {job_id}")
 
 
-def download_image(image_url: str) -> Image.Image:
-    response = requests.get(image_url, timeout=120)
-
-    if response.status_code != 200:
-        raise RuntimeError(f"Could not download image: {image_url}")
-
-    return Image.open(BytesIO(response.content)).convert("RGB")
+def download_image(url: str, destination: Path) -> None:
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    destination.write_bytes(response.content)
 
 
-def save_image_from_url(image_url: str, path: Path) -> None:
-    response = requests.get(image_url, timeout=120)
+# =========================================================
+# TYPOGRAPHY
+# =========================================================
 
-    if response.status_code != 200:
-        raise RuntimeError(f"Could not download generated image: {image_url}")
-
-    path.write_bytes(response.content)
+def get_font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(path, size=size)
 
 
-# ============================================================
-# PROMPT PARSING
-# ============================================================
-
-def extract_block(text: str, start_patterns: list[str], end_patterns: list[str]) -> str:
+def sentence_split(text: str) -> List[str]:
+    text = (text or "").strip()
     if not text:
-        return ""
-
-    upper = text.upper()
-    start_index = -1
-
-    for pattern in start_patterns:
-        idx = upper.find(pattern.upper())
-        if idx != -1:
-            start_index = idx
-            break
-
-    if start_index == -1:
-        return ""
-
-    end_index = len(text)
-
-    for pattern in end_patterns:
-        idx = upper.find(pattern.upper(), start_index + 1)
-        if idx != -1:
-            end_index = min(end_index, idx)
-
-    return text[start_index:end_index].strip()
-
-
-def extract_style_rules(prompt_pack: str) -> str:
-    return extract_block(
-        prompt_pack,
-        ["STYLE RULES"],
-        ["NEGATIVE PROMPTS", "COVER IMAGE", "CAROUSEL IMAGES", "REEL SCENES"],
-    )
-
-
-def extract_negative_prompts(prompt_pack: str) -> str:
-    return extract_block(
-        prompt_pack,
-        ["NEGATIVE PROMPTS"],
-        ["COVER IMAGE", "CAROUSEL IMAGES", "REEL SCENES"],
-    )
-
-
-def extract_cover_prompt(brief: dict) -> str:
-    prompt_pack = brief.get("Krea Prompt Pack", "")
-    style_rules = extract_style_rules(prompt_pack)
-    negative_prompts = extract_negative_prompts(prompt_pack)
-
-    cover_block = extract_block(
-        prompt_pack,
-        ["COVER IMAGE"],
-        ["CAROUSEL IMAGES", "REEL SCENES"],
-    )
-
-    if not cover_block:
-        cover_block = brief.get("Visual Concept", "")
-
-    final_prompt = f"""
-{cover_block}
-
-{style_rules}
-
-{negative_prompts}
-
-Additional production rules:
-The object must look like a deliberate fashion editorial symbol, not a random product still life.
-Composition should feel like a magazine cover background, with clear negative space reserved for typography.
-No text inside the image. No logos. No fake brand names.
-The mood should be intelligent, restrained, premium, editorial, not commercial stock photography.
-Vertical 4:5 composition for Instagram carousel cover.
-""".strip()
-
-    return final_prompt[:4000]
-
-
-def extract_carousel_block(prompt_pack: str) -> str:
-    return extract_block(
-        prompt_pack,
-        ["CAROUSEL IMAGES"],
-        ["REEL SCENES", "VIDEO", "STYLE RULES"],
-    )
-
-
-def parse_slide_prompts(carousel_block: str) -> list[dict]:
-    if not carousel_block:
         return []
 
-    text = carousel_block.replace("—", "\n—")
-
-    pattern = (
-        r"(?:Slide|Слайд)\s*(\d+)\s*[:\-]\s*"
-        r"(.*?)(?=\n\s*[—-]?\s*(?:Slide|Слайд)\s*\d+\s*[:\-]|\Z)"
-    )
-
-    matches = re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-
-    result = []
-
-    for number, prompt in matches:
-        clean = re.sub(r"\s+", " ", prompt).strip()
-
-        if len(clean) < 20:
-            continue
-
-        result.append(
-            {
-                "slide_number": int(number),
-                "prompt": clean,
-            }
-        )
-
-    return result
-
-
-def fallback_slide_prompts(brief: dict) -> list[dict]:
-    concept = brief.get("Visual Concept", "")
-    hook = brief.get("Visual Hook", "")
-
-    return [
-        {
-            "slide_number": 2,
-            "prompt": (
-                f"Premium fashion editorial background image. Visual hook: {hook}. "
-                f"Concept: {concept}. One symbolic fashion object in large negative space, "
-                "cold editorial light, matte textures, no text, no logos."
-            ),
-        },
-        {
-            "slide_number": 3,
-            "prompt": (
-                f"Premium fashion editorial contrast image. Visual hook: {hook}. "
-                "One side suggests mass fashion speed and accessibility, the other side shows "
-                "restrained luxury silence and distance. No text, no logos, no stock photo look."
-            ),
-        },
-    ]
-
-
-def build_carousel_image_prompt(base_prompt: str, brief: dict, slide_number: int) -> str:
-    prompt_pack = brief.get("Krea Prompt Pack", "")
-    style_rules = extract_style_rules(prompt_pack)
-    negative_prompts = extract_negative_prompts(prompt_pack)
-
-    final_prompt = f"""
-CAROUSEL SLIDE {slide_number} BACKGROUND IMAGE:
-
-{base_prompt}
-
-{style_rules}
-
-{negative_prompts}
-
-Additional production rules:
-Create a visual background for an Instagram carousel slide, not a finished poster.
-Do not put any text inside the image.
-No logos. No fake brand names. No random letters.
-Leave clean negative space where typography can be added later.
-The image must feel like intelligent fashion media, not stock photography.
-The subject must look deliberate and symbolic.
-Vertical 4:5 composition.
-Premium editorial lighting. Matte textures. Controlled palette.
-""".strip()
-
-    return final_prompt[:4000]
-
-
-# ============================================================
-# TYPOGRAPHY / ASSEMBLY
-# ============================================================
-
-def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    candidates = (
-        STYLE_CONFIG["fonts"]["bold_candidates"]
-        if bold
-        else STYLE_CONFIG["fonts"]["regular_candidates"]
-    )
-
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            continue
-
-    return ImageFont.load_default()
-
-
-def fit_image(img: Image.Image) -> Image.Image:
-    return ImageOps.fit(
-        img,
-        (W, H),
-        method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5),
-    )
-
-
-def parse_slide_copy(slide_copy: str) -> dict[int, str]:
-    result = {}
-
-    if not slide_copy:
-        return result
-
-    pattern = (
-        r"(?:Слайд|Slide)\s*(\d+)\s*[:：]\s*"
-        r"(.*?)(?=(?:\s*(?:Слайд|Slide)\s*\d+\s*[:：])|$)"
-    )
-
-    matches = re.findall(
-        pattern,
-        slide_copy,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-
-    for num, text in matches:
-        clean = re.sub(r"\s+", " ", text).strip()
-        clean = clean.strip(" .")
-        clean = clean.strip("«»\"“”'")
-        clean = clean.replace(" / @sv_fashionacademy", "")
-        clean = clean.replace("@sv_fashionacademy", "")
-
-        result[int(num)] = clean
-
-    return result
-
-
-def normalize_display_text(text: str) -> str:
-    text = text or ""
+    text = text.replace(" / ", "\n")
     text = re.sub(r"\s+", " ", text).strip()
-    text = text.strip("«»\"“”'")
-    text = text.replace(" / @sv_fashionacademy", "")
-    text = text.replace("@sv_fashionacademy", "")
 
-    return text.strip()
-
-
-def split_into_phrases(text: str) -> list[str]:
-    text = normalize_display_text(text)
-
-    if not text:
-        return []
-
-    parts = re.split(r"(?<=[.!?])\s+", text)
+    # Разбиваем на предложения
+    parts = re.split(r"(?<=[\.\!\?])\s+", text)
     cleaned = []
-
     for part in parts:
         part = part.strip()
-        part = part.strip(" .")
-
-        if part:
-            cleaned.append(part)
-
-    return cleaned or [text]
-
-
-def prepare_slide_text(text: str) -> str:
-    phrases = split_into_phrases(text)
-
-    if not phrases:
-        return ""
-
-    phrases = phrases[:2]
-    phrases[0] = phrases[0].upper()
-
-    return "\n".join(phrases)
-
-
-def wrap_text_by_width(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> list[str]:
-    paragraphs = text.split("\n")
-    wrapped_lines = []
-
-    for para in paragraphs:
-        para = para.strip()
-
-        if not para:
+        if not part:
             continue
+        cleaned.extend([x.strip() for x in part.split("\n") if x.strip()])
 
-        words = para.split()
+    return cleaned if cleaned else [text]
 
-        if not words:
+
+def normalize_overlay_text(text: str, is_cover: bool = False) -> List[str]:
+    """
+    Правила:
+    1) Каждое предложение — с новой строки
+    2) Первая строка — uppercase
+    3) Для cover допускается 2 строки максимум
+    """
+    parts = sentence_split(text)
+    if not parts:
+        return ["EDITORIAL"]
+
+    lines: List[str] = []
+    for idx, part in enumerate(parts):
+        part = part.strip()
+        if not part:
             continue
+        if idx == 0:
+            part = part.upper()
+        lines.append(part)
 
-        current = words[0]
+    if is_cover:
+        # cover жёстче ограничиваем
+        if len(lines) > 2:
+            first = lines[0]
+            rest = " ".join(lines[1:])
+            lines = [first, rest]
 
-        for word in words[1:]:
-            candidate = current + " " + word
-            bbox = draw.textbbox((0, 0), candidate, font=font)
-            width = bbox[2] - bbox[0]
-
-            if width <= max_width:
-                current = candidate
-            else:
-                wrapped_lines.append(current)
-                current = word
-
-        wrapped_lines.append(current)
-
-    return wrapped_lines
+    return lines
 
 
-def fit_text_block(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    preferred_size: int,
-    min_size: int,
-    max_width: int,
-    max_lines: int,
-) -> tuple[ImageFont.FreeTypeFont, list[str], int]:
-    size = preferred_size
+def wrap_text_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    words = text.split()
+    if not words:
+        return [""]
 
-    while size >= min_size:
-        font = load_font(size, bold=False)
-        lines = wrap_text_by_width(draw, text, font, max_width)
+    lines = []
+    current = words[0]
 
-        if len(lines) <= max_lines:
-            return font, lines, size
-
-        size -= 2
-
-    font = load_font(min_size, bold=False)
-    lines = wrap_text_by_width(draw, text, font, max_width)
-
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip(" .,!?:;") + "…"
-
-    return font, lines, min_size
-
-
-def split_emphasis(line: str) -> tuple[str, str]:
-    line = line.strip()
-
-    if not line:
-        return "", ""
-
-    colon_pos = line.find(":")
-
-    if colon_pos != -1 and colon_pos <= max(18, len(line) * 0.45):
-        return line[:colon_pos + 1], line[colon_pos + 1:].lstrip()
-
-    parts = line.split(" ", 1)
-
-    if len(parts) == 1:
-        return parts[0], ""
-
-    return parts[0], parts[1]
-
-
-def draw_mixed_weight_line(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    line: str,
-    regular_font: ImageFont.FreeTypeFont,
-    bold_font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int, int],
-    emphasize: bool,
-) -> None:
-    x, y = xy
-
-    if not emphasize:
-        draw.text((x, y), line, font=regular_font, fill=fill)
-        return
-
-    emphasis, rest = split_emphasis(line)
-
-    if not emphasis:
-        draw.text((x, y), line, font=regular_font, fill=fill)
-        return
-
-    draw.text((x, y), emphasis, font=bold_font, fill=fill)
-
-    bbox = draw.textbbox((0, 0), emphasis, font=bold_font)
-    emphasis_w = bbox[2] - bbox[0]
-
-    if rest:
-        draw.text(
-            (x + emphasis_w + 10, y),
-            rest,
-            font=regular_font,
-            fill=fill,
-        )
-
-
-def draw_text_plate(base: Image.Image, x: int, y: int, w: int, h: int) -> Image.Image:
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-
-    overlay_draw.rectangle(
-        [x, y, x + w, y + h],
-        fill=STYLE_CONFIG["colors"]["plate"],
-    )
-
-    return Image.alpha_composite(base.convert("RGBA"), overlay)
-
-
-def render_main_text(base: Image.Image, text: str, is_cover: bool) -> Image.Image:
-    cfg = STYLE_CONFIG["cover"] if is_cover else STYLE_CONFIG["body"]
-    prepared = prepare_slide_text(text)
-
-    if not prepared:
-        return base
-
-    draw = ImageDraw.Draw(base)
-
-    regular_font, lines, actual_size = fit_text_block(
-        draw=draw,
-        text=prepared,
-        preferred_size=cfg["font_size"],
-        min_size=cfg["min_font_size"],
-        max_width=cfg["width"],
-        max_lines=cfg["max_lines"],
-    )
-
-    bold_font = load_font(actual_size, bold=True)
-
-    if not lines:
-        return base
-
-    line_height = int(actual_size * cfg["line_height"])
-    max_line_width = 0
-
-    for index, line in enumerate(lines):
-        if index == 0:
-            emphasis, rest = split_emphasis(line)
-            emphasis_bbox = draw.textbbox((0, 0), emphasis, font=bold_font)
-            emphasis_w = emphasis_bbox[2] - emphasis_bbox[0]
-
-            if rest:
-                rest_bbox = draw.textbbox((0, 0), rest, font=regular_font)
-                rest_w = rest_bbox[2] - rest_bbox[0]
-                line_w = emphasis_w + 10 + rest_w
-            else:
-                line_w = emphasis_w
+    for word in words[1:]:
+        trial = f"{current} {word}"
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            current = trial
         else:
-            bbox = draw.textbbox((0, 0), line, font=regular_font)
-            line_w = bbox[2] - bbox[0]
+            lines.append(current)
+            current = word
 
-        max_line_width = max(max_line_width, line_w)
-
-    text_height = line_height * len(lines)
-
-    plate_x = cfg["x"] - cfg["plate_padding_x"]
-    plate_y = cfg["y"] - cfg["plate_padding_y"]
-    plate_w = max_line_width + cfg["plate_padding_x"] * 2
-    plate_h = text_height + cfg["plate_padding_y"] * 2
-
-    plate_w = min(plate_w, W - plate_x - 40)
-    plate_h = min(plate_h, H - plate_y - 40)
-
-    composed = draw_text_plate(
-        base=base,
-        x=plate_x,
-        y=plate_y,
-        w=plate_w,
-        h=plate_h,
-    )
-
-    draw = ImageDraw.Draw(composed)
-    cursor_y = cfg["y"]
-
-    for index, line in enumerate(lines):
-        draw_mixed_weight_line(
-            draw=draw,
-            xy=(cfg["x"], cursor_y),
-            line=line,
-            regular_font=regular_font,
-            bold_font=bold_font,
-            fill=STYLE_CONFIG["colors"]["white"],
-            emphasize=(index == 0),
-        )
-        cursor_y += line_height
-
-    return composed
+    lines.append(current)
+    return lines
 
 
-def draw_tracking_text(
+def prepare_text_block(
     draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int, int],
-    tracking: int,
-) -> None:
-    x, y = xy
-
-    for char in text:
-        draw.text((x, y), char, font=font, fill=fill)
-        bbox = draw.textbbox((0, 0), char, font=font)
-        x += (bbox[2] - bbox[0]) + tracking
-
-
-def render_meta(base: Image.Image, slide_number: int, total_slides: int) -> Image.Image:
-    draw = ImageDraw.Draw(base)
-    meta_cfg = STYLE_CONFIG["meta"]
-
-    brand_font = load_font(meta_cfg["brand_size"], bold=False)
-    num_font = load_font(meta_cfg["number_size"], bold=False)
-    handle_font = load_font(meta_cfg["handle_size"], bold=False)
-
-    meta_color = STYLE_CONFIG["colors"]["meta"]
-    meta_soft = STYLE_CONFIG["colors"]["meta_soft"]
-
-    draw_tracking_text(
-        draw,
-        (meta_cfg["x"], meta_cfg["y"]),
-        meta_cfg["brand"],
-        brand_font,
-        meta_color,
-        tracking=meta_cfg["tracking"],
-    )
-
-    draw.rectangle(
-        [
-            meta_cfg["x"],
-            meta_cfg["line_y"],
-            meta_cfg["x"] + meta_cfg["line_width"],
-            meta_cfg["line_y"] + meta_cfg["line_height"],
-        ],
-        fill=meta_soft,
-    )
-
-    slide_label = f"{slide_number:02d}/{total_slides:02d}"
-    bbox = draw.textbbox((0, 0), slide_label, font=num_font)
-    num_w = bbox[2] - bbox[0]
-
-    draw.text(
-        (W - meta_cfg["x"] - num_w, meta_cfg["y"]),
-        slide_label,
-        font=num_font,
-        fill=meta_color,
-    )
-
-    draw.text(
-        (meta_cfg["x"], meta_cfg["handle_y"]),
-        "@sv_fashionacademy",
-        font=handle_font,
-        fill=meta_soft,
-    )
-
-    return base
-
-
-def draw_slide(img: Image.Image, slide_number: int, text: str, total_slides: int) -> Image.Image:
-    base = fit_image(img).convert("RGBA")
-
-    is_cover = slide_number == 1
-
-    base = render_main_text(
-        base=base,
-        text=text,
-        is_cover=is_cover,
-    )
-
-    base = render_meta(
-        base=base,
-        slide_number=slide_number,
-        total_slides=total_slides,
-    )
-
-    return base.convert("RGB")
-
-
-# ============================================================
-# PRODUCTION PIPELINE
-# ============================================================
-
-def render_krea_image(prompt: str, filename: str) -> dict:
-    job_id = create_krea_image_job(prompt)
-    completed_job = wait_for_krea_job(job_id)
-    image_url = get_image_url(completed_job)
-
-    output_path = OUTPUT_DIR / filename
-    save_image_from_url(image_url, output_path)
-
-    return {
-        "job_id": job_id,
-        "image_url": image_url,
-        "output_path": str(output_path),
-    }
-
-
-def assemble_carousel(
-    cover_url: str,
-    body_results: list[dict],
-    brief: dict,
-) -> list[str]:
-    slide_copy = brief.get("Slide Copy", "")
-    texts_by_slide = parse_slide_copy(slide_copy)
-
-    if brief.get("Carousel Cover"):
-        texts_by_slide[1] = brief.get("Carousel Cover")
-
-    slide_items = [
-        {
-            "url": cover_url,
-            "text": texts_by_slide.get(1, brief.get("Carousel Cover", "")),
-        }
+    lines: List[str],
+    is_cover: bool,
+    max_width: int,
+) -> Tuple[List[Tuple[str, str]], int, int]:
+    """
+    Возвращает:
+    [
+      ("bold", "FIRST LINE"),
+      ("regular", "second line"),
+      ...
     ]
+    + width + height
+    """
+    if is_cover:
+        font_bold = get_font(FONT_BOLD, 58)
+        font_regular = get_font(FONT_REGULAR, 58)
+        line_spacing = 8
+    else:
+        font_bold = get_font(FONT_BOLD, 42)
+        font_regular = get_font(FONT_REGULAR, 42)
+        line_spacing = 6
 
-    for index, result in enumerate(body_results, start=2):
-        text = texts_by_slide.get(index, brief.get("Visual Hook", "Fashion is context."))
-        slide_items.append(
-            {
-                "url": result["image_url"],
-                "text": text,
-            }
-        )
+    prepared: List[Tuple[str, str]] = []
+    max_block_width = 0
+    total_height = 0
 
-    slide_items = slide_items[:FINAL_SLIDES]
-    total = len(slide_items)
-    rendered_files = []
+    for idx, raw_line in enumerate(lines):
+        role = "bold" if idx == 0 else "regular"
+        font = font_bold if role == "bold" else font_regular
 
-    for display_index, item in enumerate(slide_items, start=1):
-        print(f"Rendering assembled slide {display_index}")
-        print("Image URL:", item["url"])
-        print("Text:", item["text"])
+        wrapped = wrap_text_lines(draw, raw_line, font, max_width)
+        for line in wrapped:
+            prepared.append((role, line))
+            bbox = draw.textbbox((0, 0), line, font=font)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            max_block_width = max(max_block_width, w)
+            total_height += h + line_spacing
 
-        img = download_image(item["url"])
-
-        slide = draw_slide(
-            img=img,
-            slide_number=display_index,
-            text=item["text"],
-            total_slides=total,
-        )
-
-        output_path = OUTPUT_DIR / f"assembled_carousel_slide_{display_index:02d}.png"
-        slide.save(output_path, quality=95)
-
-        print("Saved assembled slide:", output_path)
-
-        rendered_files.append(str(output_path))
-
-    return rendered_files
+    total_height = max(0, total_height - line_spacing)
+    return prepared, max_block_width, total_height
 
 
-def run_pipeline() -> None:
-    print("Visual Production Bot started:", datetime.now(timezone.utc).isoformat())
+def draw_brand_header(draw: ImageDraw.ImageDraw, slide_num: int, total_slides: int) -> None:
+    header_font = get_font(FONT_REGULAR, 26)
+    small_font = get_font(FONT_REGULAR, 22)
 
-    job = fetch_queued_visual_job()
+    # Brand
+    draw.text((80, 70), BRAND_NAME, fill=(255, 255, 255, 235), font=header_font)
 
-    if not job:
-        return
+    # line under brand
+    draw.line((80, 125, 180, 125), fill=(255, 255, 255, 220), width=2)
 
-    record_id = job["id"]
-    job_fields = job.get("fields", {})
+    # slide counter
+    counter = f"{slide_num:02d}/{total_slides:02d}"
+    bbox = draw.textbbox((0, 0), counter, font=small_font)
+    w = bbox[2] - bbox[0]
+    draw.text((CANVAS_W - 80 - w, 70), counter, fill=(255, 255, 255, 235), font=small_font)
 
-    existing_render_notes = job_fields.get("Render Notes", "")
 
-    update_visual_job_fields(
-        record_id,
-        {
-            "Visual Status": "In Production",
-            "Render Notes": append_render_notes(
-                existing_render_notes,
-                f"Visual Production Bot v1 started at {datetime.now(timezone.utc).isoformat()}",
-            ),
-        },
+def draw_handle(draw: ImageDraw.ImageDraw) -> None:
+    handle_font = get_font(FONT_REGULAR, 22)
+    draw.text((80, CANVAS_H - 95), INSTAGRAM_HANDLE, fill=(255, 255, 255, 235), font=handle_font)
+
+
+def add_text_overlay(
+    base: Image.Image,
+    slide_text: str,
+    slide_num: int,
+    total_slides: int,
+    is_cover: bool = False,
+) -> Image.Image:
+    img = base.convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    draw_brand_header(draw, slide_num, total_slides)
+    draw_handle(draw)
+
+    lines = normalize_overlay_text(slide_text, is_cover=is_cover)
+
+    text_area_width = int(CANVAS_W * 0.70) if is_cover else int(CANVAS_W * 0.68)
+    prepared, block_w, block_h = prepare_text_block(draw, lines, is_cover=is_cover, max_width=text_area_width)
+
+    box_padding_x = 28
+    box_padding_y = 20
+
+    if is_cover:
+        box_x = 50
+        box_y = int(CANVAS_H * 0.37)
+    else:
+        box_x = 50
+        box_y = int(CANVAS_H * 0.60)
+
+    rect_w = block_w + box_padding_x * 2
+    rect_h = block_h + box_padding_y * 2
+
+    # Полупрозрачная плашка 15–25%
+    draw.rectangle(
+        [box_x, box_y, box_x + rect_w, box_y + rect_h],
+        fill=(0, 0, 0, 55)
     )
+
+    if is_cover:
+        font_bold = get_font(FONT_BOLD, 58)
+        font_regular = get_font(FONT_REGULAR, 58)
+        line_spacing = 8
+    else:
+        font_bold = get_font(FONT_BOLD, 42)
+        font_regular = get_font(FONT_REGULAR, 42)
+        line_spacing = 6
+
+    cursor_x = box_x + box_padding_x
+    cursor_y = box_y + box_padding_y
+
+    for role, line in prepared:
+        font = font_bold if role == "bold" else font_regular
+        draw.text((cursor_x, cursor_y), line, fill=(255, 255, 255, 255), font=font)
+        bbox = draw.textbbox((0, 0), line, font=font)
+        h = bbox[3] - bbox[1]
+        cursor_y += h + line_spacing
+
+    return Image.alpha_composite(img, overlay).convert("RGB")
+
+
+def fit_image_to_canvas(image: Image.Image) -> Image.Image:
+    image = image.convert("RGB")
+
+    scale = max(CANVAS_W / image.width, CANVAS_H / image.height)
+    new_w = int(image.width * scale)
+    new_h = int(image.height * scale)
+
+    resized = image.resize((new_w, new_h), Image.LANCZOS)
+
+    left = max(0, (new_w - CANVAS_W) // 2)
+    top = max(0, (new_h - CANVAS_H) // 2)
+    right = left + CANVAS_W
+    bottom = top + CANVAS_H
+
+    return resized.crop((left, top, right, bottom))
+
+
+def render_assembled_slide(
+    raw_image_path: Path,
+    slide_text: str,
+    slide_num: int,
+    total_slides: int,
+    output_path: Path,
+    is_cover: bool = False,
+) -> None:
+    source = Image.open(raw_image_path)
+    source = fit_image_to_canvas(source)
+    result = add_text_overlay(source, slide_text, slide_num, total_slides, is_cover=is_cover)
+    result.save(output_path, format="PNG", quality=95)
+
+
+# =========================================================
+# MAIN PIPELINE
+# =========================================================
+
+def process_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record["fields"]
+    job_title = safe_get(fields, "Job Title", "Untitled Visual Job")
+
+    print("=" * 80)
+    print(f"Processing record: {record_id}")
+    print(f"Job title: {job_title}")
 
     try:
-        source_post_title = job_fields.get("Source Post Title", "")
-        post_fields = find_matching_post(source_post_title)
+        # 1. Brief
+        update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
+        brief = generate_visual_brief(record)
 
-        brief = generate_visual_brief(job_fields, post_fields)
+        brief_fields = brief_to_airtable_fields(brief)
+        brief_fields["Visual Status"] = STATUS_RENDERING
+        update_airtable_record(record_id, brief_fields)
 
-        print("\n=== Generated brief ===")
-        print(json.dumps(brief, ensure_ascii=False, indent=2))
+        slide_count = clamp_slide_count(brief["slide_count"])
+        slide_texts = brief["slide_texts"]
+        krea_prompts = brief["krea_prompts"]
 
-        update_visual_job_fields(
-            record_id,
-            {
-                "Visual Hook": brief.get("Visual Hook", ""),
-                "Visual Concept": brief.get("Visual Concept", ""),
-                "Visual Mode": brief.get("Visual Mode", "Hybrid"),
-                "Carousel Cover": brief.get("Carousel Cover", ""),
-                "Slide Count": brief.get("Slide Count", 3),
-                "Slide Structure": brief.get("Slide Structure", ""),
-                "Slide Copy": brief.get("Slide Copy", ""),
-                "Krea Prompt Pack": brief.get("Krea Prompt Pack", ""),
-                "Krea Model Recommendation": brief.get("Krea Model Recommendation", "Manual Choice"),
-                "Render Notes": append_render_notes(
-                    existing_render_notes,
-                    "Visual brief generated by Visual Production Bot v1.",
-                ),
-            },
-        )
+        # 2. Krea render
+        raw_dir = OUTPUT_DIR / record_id / "raw"
+        assembled_dir = OUTPUT_DIR / record_id / "assembled"
+        ensure_dir(raw_dir)
+        ensure_dir(assembled_dir)
 
-        cover_prompt = extract_cover_prompt(brief)
+        raw_items: List[Dict[str, str]] = []
+        assembled_paths: List[str] = []
 
-        print("\n=== Cover prompt ===")
-        print(cover_prompt)
+        for idx in range(slide_count):
+            slide_num = idx + 1
+            prompt = krea_prompts[idx]
 
-        cover_result = render_krea_image(
-            prompt=cover_prompt,
-            filename="production_cover_background.png",
-        )
+            print(f"Rendering slide {slide_num}/{slide_count}")
+            print("Prompt:", prompt)
 
-        carousel_block = extract_carousel_block(brief.get("Krea Prompt Pack", ""))
-        slide_prompts = parse_slide_prompts(carousel_block)
+            job_id = create_krea_image_job(prompt=prompt, aspect_ratio=KREA_ASPECT_RATIO)
+            url = poll_krea_job(job_id)
 
-fallback_prompts = fallback_slide_prompts(brief)
+            raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
+            download_image(url, raw_path)
 
-if not slide_prompts:
-    print("No slide prompts parsed. Using fallback prompts.")
-    slide_prompts = fallback_prompts
+            raw_items.append({
+                "slide": str(slide_num),
+                "url": url,
+                "job_id": job_id
+            })
 
-# Если Claude дал только один body prompt, добираем до двух fallback-промптами.
-if len(slide_prompts) < BODY_IMAGES_TO_RENDER:
-    print(
-        f"Only {len(slide_prompts)} body prompt(s) parsed. "
-        "Adding fallback prompts to reach required count."
-    )
+        # 3. Assembly
+        for idx in range(slide_count):
+            slide_num = idx + 1
+            raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
+            output_path = assembled_dir / f"assembled_slide_{slide_num:02d}.png"
 
-    existing_numbers = {item.get("slide_number") for item in slide_prompts}
-
-    for fallback in fallback_prompts:
-        if len(slide_prompts) >= BODY_IMAGES_TO_RENDER:
-            break
-
-        if fallback.get("slide_number") not in existing_numbers:
-            slide_prompts.append(fallback)
-
-slide_prompts = slide_prompts[:BODY_IMAGES_TO_RENDER]
-
-        slide_prompts = slide_prompts[:BODY_IMAGES_TO_RENDER]
-
-        body_results = []
-
-        for item in slide_prompts:
-            slide_number = item["slide_number"]
-            base_prompt = item["prompt"]
-
-            final_prompt = build_carousel_image_prompt(
-                base_prompt=base_prompt,
-                brief=brief,
-                slide_number=slide_number,
+            render_assembled_slide(
+                raw_image_path=raw_path,
+                slide_text=slide_texts[idx],
+                slide_num=slide_num,
+                total_slides=slide_count,
+                output_path=output_path,
+                is_cover=(slide_num == 1),
             )
 
-            print(f"\n=== Body slide {slide_number} prompt ===")
-            print(final_prompt)
+            assembled_paths.append(str(output_path))
 
-            result = render_krea_image(
-                prompt=final_prompt,
-                filename=f"production_carousel_bg_slide_{slide_number}.png",
+        # 4. Save result in Airtable
+        output_links = build_output_links_text(raw_items, assembled_paths)
+
+        final_fields = {
+            "Visual Status": STATUS_NEEDS_REVIEW,
+            "Output Links": output_links,
+            "Slide Count": slide_count,
+            "Slide Copy": format_slide_copy_for_airtable(slide_texts),
+            "Render Notes": (
+                f"{brief['render_notes']}\n\n"
+                f"Final assembled carousel saved in GitHub Actions artifact and outputs folder.\n"
+                f"Generated at: {now_iso()}"
             )
+        }
 
-            result["slide_number"] = slide_number
-            body_results.append(result)
+        update_airtable_record(record_id, final_fields)
 
-        rendered_files = assemble_carousel(
-            cover_url=cover_result["image_url"],
-            body_results=body_results,
-            brief=brief,
-        )
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        output_lines = [
-            "Visual Production Bot v1 output:",
-            "",
-            f"Cover background: {cover_result['image_url']} | job_id: {cover_result['job_id']}",
-        ]
-
-        for result in body_results:
-            output_lines.append(
-                f"Carousel background slide {result['slide_number']}: "
-                f"{result['image_url']} | job_id: {result['job_id']}"
-            )
-
-        output_lines.append("")
-        output_lines.append("Assembled carousel files are in GitHub artifact: sv-visual-production-output")
-        output_lines.append(f"Generated at: {now}")
-
-        final_render_notes = append_render_notes(
-            job_fields.get("Render Notes", ""),
-            f"""
-Visual Production Bot v1 completed:
-- visual brief generated;
-- cover background generated;
-- {len(body_results)} carousel background images generated;
-- {len(rendered_files)} assembled carousel PNG slides created;
-- status moved to Needs Visual Review.
-Generated at: {now}
-""",
-        )
-
-        update_visual_job_fields(
-            record_id,
-            {
-                "Visual Status": "Needs Visual Review",
-                "Output Links": "\n".join(output_lines),
-                "Render Notes": final_render_notes,
-            },
-        )
-
-        print("Done. Visual Job moved to Needs Visual Review.")
+        print(f"Done: {record_id}")
+        print("Assembled files:")
+        for p in assembled_paths:
+            print(p)
 
     except Exception as error:
-        error_text = traceback.format_exc()
-        print(error_text)
-
-        fail_notes = append_render_notes(
-            job_fields.get("Render Notes", ""),
-            f"""
-Visual Production Bot v1 FAILED:
-{str(error)}
-
-Traceback:
-{error_text[:2500]}
-""",
-        )
-
-        update_visual_job_fields(
+        print("ERROR while processing record:", error)
+        update_airtable_record(
             record_id,
             {
-                "Visual Status": "Failed",
-                "Render Notes": fail_notes,
-            },
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": f"Error at {now_iso()}:\n{str(error)}"
+            }
         )
-
         raise
 
 
+def main() -> None:
+    print("Visual Production Bot v2 started:", now_iso())
+
+    records = get_queued_visual_jobs(limit=1)
+
+    if not records:
+        print("No queued visual jobs found.")
+        return
+
+    for record in records:
+        process_record(record)
+
+    print("Visual Production Bot v2 finished.")
+
+
 if __name__ == "__main__":
-    run_pipeline()
+    main()
