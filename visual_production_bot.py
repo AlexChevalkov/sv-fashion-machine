@@ -935,7 +935,7 @@ Generated at {now_iso()}
     )
 
     print("Done. Reel brief generated and moved to Needs Visual Review.")
-    def download_reel_image(image_url: str, filename: str) -> str:
+def download_reel_image(image_url: str, filename: str) -> str:
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
 
