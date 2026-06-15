@@ -21,6 +21,81 @@ W, H = 1080, 1350
 MAX_SLIDES = 3
 
 
+# ============================================================
+# SV FASHION MEDIA — CAROUSEL STYLE SYSTEM
+# ============================================================
+
+STYLE_CONFIG = {
+    "fonts": {
+        # Можно позже положить свои шрифты сюда:
+        # assets/fonts/RobotoCondensed-Regular.ttf
+        # assets/fonts/RobotoCondensed-Bold.ttf
+        "regular_candidates": [
+            "assets/fonts/RobotoCondensed-Regular.ttf",
+            "assets/fonts/IBMPlexSansCondensed-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+        "bold_candidates": [
+            "assets/fonts/RobotoCondensed-Bold.ttf",
+            "assets/fonts/IBMPlexSansCondensed-Medium.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ],
+    },
+    "colors": {
+        "white": (255, 255, 255, 255),
+        "meta": (255, 255, 255, 175),
+        "meta_soft": (255, 255, 255, 135),
+        "plate": (0, 0, 0, int(255 * 0.24)),  # 24% black plate
+        "subtle_veil": (0, 0, 0, 0),
+    },
+    "meta": {
+        "x": 78,
+        "y": 66,
+        "brand": "SV FASHION MEDIA",
+        "brand_size": 24,
+        "number_size": 22,
+        "handle_size": 22,
+        "tracking": 4,
+        "line_y": 126,
+        "line_width": 96,
+        "line_height": 1,
+        "handle_y": 1248,
+    },
+    "cover": {
+        "x": 78,
+        "y": 520,
+        "width": 690,
+        "font_size": 56,
+        "min_font_size": 40,
+        "line_height": 1.12,
+        "max_lines": 4,
+        "bold": False,
+        "plate_padding_x": 28,
+        "plate_padding_y": 20,
+    },
+    "body": {
+        "x": 78,
+        "y": 830,
+        "width": 720,
+        "font_size": 42,
+        "min_font_size": 30,
+        "line_height": 1.16,
+        "max_lines": 4,
+        "bold": False,
+        "plate_padding_x": 28,
+        "plate_padding_y": 20,
+    },
+}
+
+
+# ============================================================
+# AIRTABLE
+# ============================================================
+
 def airtable_table_url(table_name: str) -> str:
     table_encoded = quote(table_name, safe="")
     return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
@@ -38,7 +113,12 @@ def fetch_job() -> dict | None:
 
     params = {
         "pageSize": 1,
-        "filterByFormula": "OR({Visual Status} = 'Carousel Images Approved', {Visual Status} = 'Carousel images approved')",
+        "filterByFormula": (
+            "OR("
+            "{Visual Status} = 'Carousel Images Approved', "
+            "{Visual Status} = 'Carousel images approved'"
+            ")"
+        ),
     }
 
     response = requests.get(
@@ -49,7 +129,7 @@ def fetch_job() -> dict | None:
     )
 
     print("Read Visual Jobs status:", response.status_code)
-    print("Read Visual Jobs preview:", response.text[:1000])
+    print("Read Visual Jobs preview:", response.text[:1200])
 
     if response.status_code != 200:
         raise RuntimeError("Could not read Visual Jobs")
@@ -63,318 +143,6 @@ def fetch_job() -> dict | None:
     return records[0]
 
 
-STYLE_CONFIG = {
-    "colors": {
-        "cream": (238, 234, 224, 255),
-        "muted": (196, 191, 181, 255),
-        "soft_muted": (170, 166, 158, 255),
-        "shadow": (0, 0, 0, 95),
-    },
-    "layout": {
-        "margin_x": 92,
-        "header_y": 78,
-        "rule_y": 132,
-        "rule_width": 96,
-        "footer_y": 1268,
-    },
-    "cover": {
-        "x": 92,
-        "y": 520,
-        "width": 760,
-        "font_size": 56,
-        "min_font_size": 42,
-        "line_height": 1.12,
-        "max_lines": 4,
-        "bold": False,
-    },
-    "body": {
-        "x": 92,
-        "y": 835,
-        "width": 780,
-        "font_size": 40,
-        "min_font_size": 32,
-        "line_height": 1.16,
-        "max_lines": 5,
-        "bold": False,
-    },
-    "small": {
-        "header_size": 24,
-        "number_size": 22,
-        "footer_size": 22,
-        "tracking": 3,
-    },
-    "overlay": {
-        "global_dark_alpha": 24,
-        "bottom_gradient_start": 0.62,
-        "bottom_gradient_max_alpha": 135,
-    },
-}
-
-
-def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    """
-    Пытаемся взять более нейтральный sans.
-    Если Liberation нет на runner, fallback на DejaVu.
-    """
-    if bold:
-        candidates = [
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        ]
-
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
-            pass
-
-    return ImageFont.load_default()
-
-
-def download_image(url: str) -> Image.Image:
-    response = requests.get(url, timeout=120)
-
-    if response.status_code != 200:
-        raise RuntimeError(f"Could not download image: {url}")
-
-    return Image.open(BytesIO(response.content)).convert("RGB")
-
-
-def fit_image(img: Image.Image) -> Image.Image:
-    return ImageOps.fit(
-        img,
-        (W, H),
-        method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5),
-    )
-
-
-def add_overlays(img: Image.Image) -> Image.Image:
-    base = img.convert("RGBA")
-
-    overlay_cfg = STYLE_CONFIG["overlay"]
-
-    # Очень лёгкое затемнение всего кадра.
-    # Было грубее; теперь оставляем изображению больше воздуха.
-    veil = Image.new(
-        "RGBA",
-        (W, H),
-        (0, 0, 0, overlay_cfg["global_dark_alpha"]),
-    )
-    base = Image.alpha_composite(base, veil)
-
-    # Нижний градиент теперь начинается ниже.
-    # Это меньше похоже на стандартный social-media затемнитель.
-    gradient = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    pix = gradient.load()
-
-    start_y = int(H * overlay_cfg["bottom_gradient_start"])
-    max_alpha = overlay_cfg["bottom_gradient_max_alpha"]
-
-    for y in range(H):
-        if y > start_y:
-            ratio = (y - start_y) / max(1, H - start_y)
-            alpha = int(min(max_alpha, ratio * max_alpha))
-
-            for x in range(W):
-                pix[x, y] = (0, 0, 0, alpha)
-
-    base = Image.alpha_composite(base, gradient)
-
-    return base
-
-
-def wrap_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> list[str]:
-    words = text.split()
-    lines = []
-    current = ""
-
-    for word in words:
-        test = f"{current} {word}".strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        width = bbox[2] - bbox[0]
-
-        if width <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-
-    if current:
-        lines.append(current)
-
-    return lines
-
-
-def draw_tracking_text(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int, int],
-    tracking: int = 2,
-) -> None:
-    x, y = xy
-
-    for char in text:
-        draw.text((x, y), char, font=font, fill=fill)
-        bbox = draw.textbbox((0, 0), char, font=font)
-        char_width = bbox[2] - bbox[0]
-        x += char_width + tracking
-
-
-def draw_text_with_shadow(
-    draw: ImageDraw.ImageDraw,
-    xy: tuple[int, int],
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int, int],
-) -> None:
-    x, y = xy
-    shadow = STYLE_CONFIG["colors"]["shadow"]
-
-    # Мягкая техническая тень вместо дешёвой обводки stroke.
-    draw.text((x + 2, y + 2), text, font=font, fill=shadow)
-    draw.text((x, y), text, font=font, fill=fill)
-
-
-def normalize_display_text(text: str) -> str:
-    text = text or ""
-    text = re.sub(r"\s+", " ", text).strip()
-    text = text.strip("«»\"“”'")
-
-    # Убираем слишком длинные служебные подписи из одного слайда.
-    text = text.replace(" / @sv_fashionacademy", "")
-    text = text.replace("@sv_fashionacademy", "")
-
-    return text.strip()
-
-
-def draw_main_text_block(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    cfg: dict,
-    color: tuple[int, int, int, int],
-) -> None:
-    font_size = cfg["font_size"]
-    min_size = cfg["min_font_size"]
-    is_bold = cfg.get("bold", False)
-
-    text = normalize_display_text(text)
-
-    font = load_font(font_size, bold=is_bold)
-    lines = wrap_text(draw, text, font, cfg["width"])
-
-    while len(lines) > cfg["max_lines"] and font_size > min_size:
-        font_size -= 2
-        font = load_font(font_size, bold=is_bold)
-        lines = wrap_text(draw, text, font, cfg["width"])
-
-    # Если всё ещё слишком много строк — режем.
-    # Это лучше, чем убить композицию.
-    lines = lines[: cfg["max_lines"]]
-
-    line_height = int(font_size * cfg["line_height"])
-
-    for i, line in enumerate(lines):
-        draw_text_with_shadow(
-            draw,
-            (cfg["x"], cfg["y"] + i * line_height),
-            line,
-            font,
-            color,
-        )
-
-
-def draw_slide(
-    img: Image.Image,
-    slide_number: int,
-    text: str,
-    total_slides: int,
-) -> Image.Image:
-    canvas = add_overlays(fit_image(img))
-    draw = ImageDraw.Draw(canvas)
-
-    colors = STYLE_CONFIG["colors"]
-    layout = STYLE_CONFIG["layout"]
-    small = STYLE_CONFIG["small"]
-
-    cream = colors["cream"]
-    muted = colors["muted"]
-    soft_muted = colors["soft_muted"]
-
-    header_font = load_font(small["header_size"], bold=False)
-    number_font = load_font(small["number_size"], bold=False)
-    footer_font = load_font(small["footer_size"], bold=False)
-
-    margin_x = layout["margin_x"]
-
-    # Header: тише, меньше, с лёгким tracking.
-    draw_tracking_text(
-        draw,
-        (margin_x, layout["header_y"]),
-        "SV FASHION MEDIA",
-        header_font,
-        muted,
-        tracking=small["tracking"],
-    )
-
-    draw.text(
-        (W - 160, layout["header_y"]),
-        f"{slide_number:02d}/{total_slides:02d}",
-        font=number_font,
-        fill=muted,
-    )
-
-    # Линия стала короче и тоньше.
-    draw.line(
-        (
-            margin_x,
-            layout["rule_y"],
-            margin_x + layout["rule_width"],
-            layout["rule_y"],
-        ),
-        fill=soft_muted,
-        width=1,
-    )
-
-    if slide_number == 1:
-        text_cfg = STYLE_CONFIG["cover"]
-    else:
-        text_cfg = STYLE_CONFIG["body"]
-
-    draw_main_text_block(
-        draw=draw,
-        text=text,
-        cfg=text_cfg,
-        color=cream,
-    )
-
-    # Footer: меньше и спокойнее.
-    draw.text(
-        (margin_x, layout["footer_y"]),
-        "@sv_fashionacademy",
-        font=footer_font,
-        fill=soft_muted,
-    )
-
-    return canvas.convert("RGB")
-
 def update_visual_job(record_id: str, fields: dict, rendered_files: list[str]) -> None:
     url = f"{airtable_table_url(VISUAL_TABLE_NAME)}/{record_id}"
 
@@ -386,9 +154,14 @@ def update_visual_job(record_id: str, fields: dict, rendered_files: list[str]) -
 
 ---
 
-Carousel Assembly Bot v1:
-Assembled {len(rendered_files)} carousel PNG slides with typography overlay.
-Files are available in the GitHub artifact: krea-carousel-assembled.
+Carousel Assembly Bot v2:
+Assembled {len(rendered_files)} carousel PNG slides with the updated SV Fashion Media typography system:
+- condensed sans typography;
+- white text only;
+- semi-transparent black local plate under main text;
+- first line uppercase;
+- sentence / meaning-block line breaks;
+- max 4 text lines per slide.
 Generated at: {now}
 """.strip()
 
@@ -412,6 +185,65 @@ Generated at: {now}
 
     if response.status_code not in [200, 201, 202]:
         raise RuntimeError("Could not update Visual Job")
+
+
+# ============================================================
+# FONTS
+# ============================================================
+
+def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    candidates = (
+        STYLE_CONFIG["fonts"]["bold_candidates"]
+        if bold
+        else STYLE_CONFIG["fonts"]["regular_candidates"]
+    )
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+
+    return ImageFont.load_default()
+
+
+# ============================================================
+# IMAGE HELPERS
+# ============================================================
+
+def download_image(url: str) -> Image.Image:
+    response = requests.get(url, timeout=120)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download image: {url}")
+
+    return Image.open(BytesIO(response.content)).convert("RGB")
+
+
+def fit_image(img: Image.Image) -> Image.Image:
+    return ImageOps.fit(
+        img,
+        (W, H),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+
+
+def apply_subtle_veil(img: Image.Image) -> Image.Image:
+    base = img.convert("RGBA")
+    veil_color = STYLE_CONFIG["colors"]["subtle_veil"]
+
+    if veil_color[3] <= 0:
+        return base
+
+    veil = Image.new("RGBA", (W, H), veil_color)
+    return Image.alpha_composite(base, veil)
+
+
+# ============================================================
+# PARSING
+# ============================================================
+
 def parse_slide_copy(slide_copy: str) -> dict[int, str]:
     """
     Разбирает поле Slide Copy из Airtable.
@@ -419,13 +251,12 @@ def parse_slide_copy(slide_copy: str) -> dict[int, str]:
     Пример:
     Слайд 1: ...
     Слайд 2: ...
-    Слайд 3: ...
+    Slide 3: ...
 
     Возвращает:
     {
         1: "текст первого слайда",
         2: "текст второго слайда",
-        3: "текст третьего слайда",
     }
     """
 
@@ -434,7 +265,10 @@ def parse_slide_copy(slide_copy: str) -> dict[int, str]:
     if not slide_copy:
         return result
 
-    pattern = r"(?:Слайд|Slide)\s*(\d+)\s*[:：]\s*(.*?)(?=(?:\s*(?:Слайд|Slide)\s*\d+\s*[:：])|$)"
+    pattern = (
+        r"(?:Слайд|Slide)\s*(\d+)\s*[:：]\s*"
+        r"(.*?)(?=(?:\s*(?:Слайд|Slide)\s*\d+\s*[:：])|$)"
+    )
 
     matches = re.findall(
         pattern,
@@ -447,18 +281,24 @@ def parse_slide_copy(slide_copy: str) -> dict[int, str]:
         clean = clean.strip(" .")
         clean = clean.strip("«»\"“”'")
 
+        # Убираем служебные хвосты, которые лучше не класть на слайд.
+        clean = clean.replace(" / @sv_fashionacademy", "")
+        clean = clean.replace("@sv_fashionacademy", "")
+
         result[int(num)] = clean
 
     return result
-    
+
+
 def extract_image_urls(output_links: str) -> dict[int, str]:
     """
     Из поля Output Links вытаскивает ссылки на изображения.
-    Возвращает словарь:
+
+    Возвращает:
     1 = cover image
-    2 = slide 2
-    3 = slide 3
-    4 = slide 4
+    2 = carousel slide 2
+    3 = carousel slide 3
+    4 = carousel slide 4
     """
 
     result = {}
@@ -484,7 +324,342 @@ def extract_image_urls(output_links: str) -> dict[int, str]:
     for slide_num, url in slide_matches:
         result[int(slide_num)] = url.strip()
 
+    # Fallback: если формат Output Links изменился
+    if not result:
+        all_urls = re.findall(r"https?://[^\s|]+", output_links)
+        for index, url in enumerate(all_urls[:MAX_SLIDES], start=1):
+            result[index] = url.strip()
+
     return result
+
+
+# ============================================================
+# TEXT SYSTEM
+# ============================================================
+
+def normalize_display_text(text: str) -> str:
+    text = text or ""
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip("«»\"“”'")
+
+    text = text.replace(" / @sv_fashionacademy", "")
+    text = text.replace("@sv_fashionacademy", "")
+
+    return text.strip()
+
+
+def split_into_phrases(text: str) -> list[str]:
+    """
+    Делим текст на смысловые фразы.
+    Базовое правило: каждое предложение — с новой строки.
+    """
+
+    text = normalize_display_text(text)
+
+    if not text:
+        return []
+
+    # Сначала делим по точкам / вопросам / восклицаниям.
+    parts = re.split(r"(?<=[.!?])\s+", text)
+
+    cleaned = []
+
+    for part in parts:
+        part = part.strip()
+        part = part.strip(" .")
+
+        if not part:
+            continue
+
+        cleaned.append(part)
+
+    # Если точек не было, оставляем одну фразу.
+    if not cleaned and text:
+        cleaned = [text]
+
+    return cleaned
+
+
+def prepare_slide_text(text: str) -> str:
+    phrases = split_into_phrases(text)
+
+    if not phrases:
+        return ""
+
+    # Для базовой premium-системы не перегружаем слайд.
+    # Берём максимум 2 смысловые фразы, иначе всё становится текстовым постером.
+    phrases = phrases[:2]
+
+    # Первая строка — uppercase.
+    phrases[0] = phrases[0].upper()
+
+    return "\n".join(phrases)
+
+
+def wrap_text_by_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+) -> list[str]:
+    paragraphs = text.split("\n")
+    wrapped_lines = []
+
+    for para in paragraphs:
+        para = para.strip()
+
+        if not para:
+            continue
+
+        words = para.split()
+
+        if not words:
+            continue
+
+        current = words[0]
+
+        for word in words[1:]:
+            candidate = current + " " + word
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            width = bbox[2] - bbox[0]
+
+            if width <= max_width:
+                current = candidate
+            else:
+                wrapped_lines.append(current)
+                current = word
+
+        wrapped_lines.append(current)
+
+    return wrapped_lines
+
+
+def fit_text_block(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    preferred_size: int,
+    min_size: int,
+    max_width: int,
+    max_lines: int,
+    bold: bool = False,
+) -> tuple[ImageFont.FreeTypeFont, list[str], int]:
+    size = preferred_size
+
+    while size >= min_size:
+        font = load_font(size, bold=bold)
+        lines = wrap_text_by_width(draw, text, font, max_width)
+
+        if len(lines) <= max_lines:
+            return font, lines, size
+
+        size -= 2
+
+    font = load_font(min_size, bold=bold)
+    lines = wrap_text_by_width(draw, text, font, max_width)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+
+        if lines:
+            lines[-1] = lines[-1].rstrip(" .,!?:;") + "…"
+
+    return font, lines, min_size
+
+
+def draw_tracking_text(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+    tracking: int = 3,
+) -> None:
+    x, y = xy
+
+    for char in text:
+        draw.text((x, y), char, font=font, fill=fill)
+        bbox = draw.textbbox((0, 0), char, font=font)
+        char_width = bbox[2] - bbox[0]
+        x += char_width + tracking
+
+
+def draw_text_plate(
+    base: Image.Image,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+) -> Image.Image:
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    overlay_draw.rectangle(
+        [x, y, x + w, y + h],
+        fill=STYLE_CONFIG["colors"]["plate"],
+    )
+
+    return Image.alpha_composite(base.convert("RGBA"), overlay)
+
+
+def render_main_text(
+    base: Image.Image,
+    text: str,
+    is_cover: bool,
+) -> Image.Image:
+    cfg = STYLE_CONFIG["cover"] if is_cover else STYLE_CONFIG["body"]
+
+    prepared = prepare_slide_text(text)
+
+    if not prepared:
+        return base
+
+    draw = ImageDraw.Draw(base)
+
+    font, lines, actual_size = fit_text_block(
+        draw=draw,
+        text=prepared,
+        preferred_size=cfg["font_size"],
+        min_size=cfg["min_font_size"],
+        max_width=cfg["width"],
+        max_lines=cfg["max_lines"],
+        bold=cfg.get("bold", False),
+    )
+
+    if not lines:
+        return base
+
+    line_height = int(actual_size * cfg["line_height"])
+
+    max_line_width = 0
+
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        max_line_width = max(max_line_width, bbox[2] - bbox[0])
+
+    text_height = line_height * len(lines)
+
+    plate_x = cfg["x"] - cfg["plate_padding_x"]
+    plate_y = cfg["y"] - cfg["plate_padding_y"]
+    plate_w = max_line_width + cfg["plate_padding_x"] * 2
+    plate_h = text_height + cfg["plate_padding_y"] * 2
+
+    # Страховка, чтобы плашка не вышла за край.
+    plate_w = min(plate_w, W - plate_x - 40)
+    plate_h = min(plate_h, H - plate_y - 40)
+
+    composed = draw_text_plate(
+        base=base,
+        x=plate_x,
+        y=plate_y,
+        w=plate_w,
+        h=plate_h,
+    )
+
+    draw = ImageDraw.Draw(composed)
+
+    cursor_y = cfg["y"]
+
+    for line in lines:
+        draw.text(
+            (cfg["x"], cursor_y),
+            line,
+            font=font,
+            fill=STYLE_CONFIG["colors"]["white"],
+        )
+        cursor_y += line_height
+
+    return composed
+
+
+def render_meta(
+    base: Image.Image,
+    slide_number: int,
+    total_slides: int,
+) -> Image.Image:
+    draw = ImageDraw.Draw(base)
+
+    meta_cfg = STYLE_CONFIG["meta"]
+
+    brand_font = load_font(meta_cfg["brand_size"], bold=False)
+    num_font = load_font(meta_cfg["number_size"], bold=False)
+    handle_font = load_font(meta_cfg["handle_size"], bold=False)
+
+    meta_color = STYLE_CONFIG["colors"]["meta"]
+    meta_soft = STYLE_CONFIG["colors"]["meta_soft"]
+
+    # Brand label with tracking
+    draw_tracking_text(
+        draw,
+        (meta_cfg["x"], meta_cfg["y"]),
+        meta_cfg["brand"],
+        brand_font,
+        meta_color,
+        tracking=meta_cfg["tracking"],
+    )
+
+    # Thin rule
+    draw.rectangle(
+        [
+            meta_cfg["x"],
+            meta_cfg["line_y"],
+            meta_cfg["x"] + meta_cfg["line_width"],
+            meta_cfg["line_y"] + meta_cfg["line_height"],
+        ],
+        fill=meta_soft,
+    )
+
+    # Slide number
+    slide_label = f"{slide_number:02d}/{total_slides:02d}"
+    bbox = draw.textbbox((0, 0), slide_label, font=num_font)
+    num_w = bbox[2] - bbox[0]
+
+    draw.text(
+        (W - meta_cfg["x"] - num_w, meta_cfg["y"]),
+        slide_label,
+        font=num_font,
+        fill=meta_color,
+    )
+
+    # Handle
+    draw.text(
+        (meta_cfg["x"], meta_cfg["handle_y"]),
+        "@sv_fashionacademy",
+        font=handle_font,
+        fill=meta_soft,
+    )
+
+    return base
+
+
+def draw_slide(
+    img: Image.Image,
+    slide_number: int,
+    text: str,
+    total_slides: int,
+) -> Image.Image:
+    base = fit_image(img).convert("RGBA")
+    base = apply_subtle_veil(base)
+
+    is_cover = slide_number == 1
+
+    base = render_main_text(
+        base=base,
+        text=text,
+        is_cover=is_cover,
+    )
+
+    base = render_meta(
+        base=base,
+        slide_number=slide_number,
+        total_slides=total_slides,
+    )
+
+    return base.convert("RGB")
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> None:
     print("Carousel Assembly Bot started:", datetime.now(timezone.utc).isoformat())
@@ -515,11 +690,11 @@ def main() -> None:
 
     slide_items = []
 
-    # собираем slide 1 + первые два image slides, если есть
+    # Собираем cover + первые два визуальных слайда.
     for slide_number in [1, 2, 3]:
         url = urls_by_slide.get(slide_number)
 
-        # если slide 3 нет, пробуем взять slide 4 как третий визуальный слайд
+        # Если slide 3 нет, берём slide 4 как третий assembled slide.
         if not url and slide_number == 3:
             url = urls_by_slide.get(4)
 
@@ -536,7 +711,7 @@ def main() -> None:
 
         slide_items.append(
             {
-                "slide_number": slide_number,
+                "source_slide_number": slide_number,
                 "url": url,
                 "text": text,
             }
@@ -549,11 +724,15 @@ def main() -> None:
     rendered_files = []
 
     for display_index, item in enumerate(slide_items, start=1):
-        print(f"Rendering assembled slide {display_index} from source slide {item['slide_number']}")
+        print(
+            f"Rendering assembled slide {display_index} "
+            f"from source slide {item['source_slide_number']}"
+        )
         print("Image URL:", item["url"])
         print("Text:", item["text"])
 
         img = download_image(item["url"])
+
         slide = draw_slide(
             img=img,
             slide_number=display_index,
