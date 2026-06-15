@@ -23,7 +23,7 @@ jobs:
       - name: Run Visual Production Bot
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          
           KREA_API_KEY: ${{ secrets.KREA_API_KEY }}
           KREA_CREATE_URL: ${{ secrets.KREA_CREATE_URL }}
           KREA_JOB_URL_TEMPLATE: ${{ secrets.KREA_JOB_URL_TEMPLATE }}
