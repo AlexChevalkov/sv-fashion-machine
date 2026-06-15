@@ -412,6 +412,45 @@ Generated at: {now}
 
     if response.status_code not in [200, 201, 202]:
         raise RuntimeError("Could not update Visual Job")
+def parse_slide_copy(slide_copy: str) -> dict[int, str]:
+    """
+    Разбирает поле Slide Copy из Airtable.
+
+    Пример:
+    Слайд 1: ...
+    Слайд 2: ...
+    Слайд 3: ...
+
+    Возвращает:
+    {
+        1: "текст первого слайда",
+        2: "текст второго слайда",
+        3: "текст третьего слайда",
+    }
+    """
+
+    result = {}
+
+    if not slide_copy:
+        return result
+
+    pattern = r"(?:Слайд|Slide)\s*(\d+)\s*[:：]\s*(.*?)(?=(?:\s*(?:Слайд|Slide)\s*\d+\s*[:：])|$)"
+
+    matches = re.findall(
+        pattern,
+        slide_copy,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    for num, text in matches:
+        clean = re.sub(r"\s+", " ", text).strip()
+        clean = clean.strip(" .")
+        clean = clean.strip("«»\"“”'")
+
+        result[int(num)] = clean
+
+    return result
+    
 def extract_image_urls(output_links: str) -> dict[int, str]:
     """
     Из поля Output Links вытаскивает ссылки на изображения.
