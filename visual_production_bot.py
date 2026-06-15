@@ -151,7 +151,15 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
         # fallback: formula query
         params = {
             "maxRecords": limit,
-            "filterByFormula": "{Visual Status}='Queued'"
+            "filterByFormula": (
+                "OR("
+                "{Visual Status}='Queued',"
+                "AND("
+                "OR({Format}='Reel',{Chosen Format}='Reel'),"
+                "{Visual Status}='Approved Visual'"
+                ")"
+                ")"
+            ),
         }
         response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
         print("Fallback read status:", response.status_code)
@@ -166,9 +174,9 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
 def update_airtable_record(record_id: str, fields: Dict[str, Any]) -> None:
     url = f"{airtable_base_url()}/{record_id}"
     payload = {
-    "fields": fields,
-    "typecast": True,
-}
+        "fields": fields,
+        "typecast": True,
+    }
     response = requests.patch(url, headers=airtable_headers(), json=payload, timeout=30)
     print("Update Visual Job status:", response.status_code)
     print("Update Visual Job preview:", shorten(response.text, 1200))
@@ -422,7 +430,7 @@ def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
         "Krea Prompt Pack": brief["krea_prompt_pack"],
         "Krea Model Recommendation": "Manual Choice",
         "Render Notes": brief["render_notes"],
-        "Visual Status": STATUS_BRIEF_READY,
+        "Visual Status": STATUS_RENDERING,
     }
 
 
@@ -935,6 +943,8 @@ Generated at {now_iso()}
     )
 
     print("Done. Reel brief generated and moved to Needs Visual Review.")
+
+
 def download_reel_image(image_url: str, filename: str) -> str:
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
@@ -1171,6 +1181,8 @@ Failed at:
         )
 
         raise
+
+
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record["fields"]
@@ -1179,12 +1191,15 @@ def process_record(record: Dict[str, Any]) -> None:
     print("=" * 80)
     print(f"Processing record: {record_id}")
     print(f"Job title: {job_title}")
-        status_value = safe_get(fields, "Visual Status", "").strip()
 
+    status_value = safe_get(fields, "Visual Status", "").strip()
     format_value = (
         safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
     ).strip().lower()
 
+    # Reel-only branch:
+    # Queued          -> generate Reel Brief
+    # Approved Visual -> generate 9:16 keyframes
     if "reel" in format_value and "carousel" not in format_value:
         if status_value == STATUS_QUEUED:
             process_reel_brief_record(record)
@@ -1200,7 +1215,7 @@ def process_record(record: Dict[str, Any]) -> None:
 
         print(f"Reel record is not actionable. Status: {status_value}")
         return
-        
+
     try:
         # 1. Brief
         update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
@@ -1239,7 +1254,7 @@ def process_record(record: Dict[str, Any]) -> None:
             raw_items.append({
                 "slide": str(slide_num),
                 "url": url,
-                "job_id": job_id
+                "job_id": job_id,
             })
 
         # 3. Assembly
@@ -1271,15 +1286,15 @@ def process_record(record: Dict[str, Any]) -> None:
                 f"{brief['render_notes']}\n\n"
                 f"Final assembled carousel saved in GitHub Actions artifact and outputs folder.\n"
                 f"Generated at: {now_iso()}"
-            )
+            ),
         }
 
         update_airtable_record(record_id, final_fields)
 
         print(f"Done: {record_id}")
         print("Assembled files:")
-        for p in assembled_paths:
-            print(p)
+        for path in assembled_paths:
+            print(path)
 
     except Exception as error:
         print("ERROR while processing record:", error)
@@ -1287,11 +1302,10 @@ def process_record(record: Dict[str, Any]) -> None:
             record_id,
             {
                 "Visual Status": STATUS_ERROR,
-                "Render Notes": f"Error at {now_iso()}:\n{str(error)}"
-            }
+                "Render Notes": f"Error at {now_iso()}:\n{str(error)}",
+            },
         )
         raise
-
 
 def main() -> None:
     print("Visual Production Bot v2 started:", now_iso())
