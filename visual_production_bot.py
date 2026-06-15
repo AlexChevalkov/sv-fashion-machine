@@ -1179,27 +1179,28 @@ def process_record(record: Dict[str, Any]) -> None:
     print("=" * 80)
     print(f"Processing record: {record_id}")
     print(f"Job title: {job_title}")
-    status_value = safe_get(fields, "Visual Status", "").strip()
+        status_value = safe_get(fields, "Visual Status", "").strip()
 
-format_value = (
-    safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
-).strip().lower()
+    format_value = (
+        safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
+    ).strip().lower()
 
-if "reel" in format_value and "carousel" not in format_value:
-    if status_value == STATUS_QUEUED:
-        process_reel_brief_record(record)
-        return
-
-    if status_value == STATUS_APPROVED:
-        if "Reel keyframes generated" in safe_get(fields, "Output Links", ""):
-            print("Reel keyframes already generated. Skipping.")
+    if "reel" in format_value and "carousel" not in format_value:
+        if status_value == STATUS_QUEUED:
+            process_reel_brief_record(record)
             return
 
-        process_reel_keyframes_record(record)
-        return
+        if status_value == STATUS_APPROVED:
+            if "Reel keyframes generated" in safe_get(fields, "Output Links", ""):
+                print("Reel keyframes already generated. Skipping.")
+                return
 
-    print(f"Reel record is not actionable. Status: {status_value}")
-    return
+            process_reel_keyframes_record(record)
+            return
+
+        print(f"Reel record is not actionable. Status: {status_value}")
+        return
+        
     try:
         # 1. Brief
         update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
