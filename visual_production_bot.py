@@ -1224,9 +1224,29 @@ def run_pipeline() -> None:
         carousel_block = extract_carousel_block(brief.get("Krea Prompt Pack", ""))
         slide_prompts = parse_slide_prompts(carousel_block)
 
-        if not slide_prompts:
-            print("No slide prompts parsed. Using fallback prompts.")
-            slide_prompts = fallback_slide_prompts(brief)
+fallback_prompts = fallback_slide_prompts(brief)
+
+if not slide_prompts:
+    print("No slide prompts parsed. Using fallback prompts.")
+    slide_prompts = fallback_prompts
+
+# Если Claude дал только один body prompt, добираем до двух fallback-промптами.
+if len(slide_prompts) < BODY_IMAGES_TO_RENDER:
+    print(
+        f"Only {len(slide_prompts)} body prompt(s) parsed. "
+        "Adding fallback prompts to reach required count."
+    )
+
+    existing_numbers = {item.get("slide_number") for item in slide_prompts}
+
+    for fallback in fallback_prompts:
+        if len(slide_prompts) >= BODY_IMAGES_TO_RENDER:
+            break
+
+        if fallback.get("slide_number") not in existing_numbers:
+            slide_prompts.append(fallback)
+
+slide_prompts = slide_prompts[:BODY_IMAGES_TO_RENDER]
 
         slide_prompts = slide_prompts[:BODY_IMAGES_TO_RENDER]
 
