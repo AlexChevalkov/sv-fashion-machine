@@ -168,7 +168,10 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
 
 def update_airtable_record(record_id: str, fields: Dict[str, Any]) -> None:
     url = f"{airtable_base_url()}/{record_id}"
-    payload = {"fields": fields}
+    payload = {
+    "fields": fields,
+    "typecast": True,
+}
     response = requests.patch(url, headers=airtable_headers(), json=payload, timeout=30)
     print("Update Visual Job status:", response.status_code)
     print("Update Visual Job preview:", shorten(response.text, 1200))
@@ -420,7 +423,7 @@ def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
         "Slide Count": brief["slide_count"],
         "Slide Copy": format_slide_copy_for_airtable(brief["slide_texts"]),
         "Krea Prompt Pack": brief["krea_prompt_pack"],
-        "Krea Model Recommendation": brief["krea_model_recommendation"],
+        "Krea Model Recommendation": "Manual Choice",
         "Render Notes": brief["render_notes"],
         "Visual Status": STATUS_BRIEF_READY,
     }
