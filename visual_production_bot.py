@@ -58,10 +58,10 @@ FONT_BOLD = os.environ.get(
 
 # Statuses
 STATUS_QUEUED = "Queued"
-STATUS_BRIEF_READY = "Brief Ready"
-STATUS_RENDERING = "Rendering"
+STATUS_BRIEF_READY = "In Production"
+STATUS_RENDERING = "In Production"
 STATUS_NEEDS_REVIEW = "Needs Visual Review"
-STATUS_ERROR = "Error"
+STATUS_ERROR = "Failed"
 
 
 # =========================================================
