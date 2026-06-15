@@ -501,6 +501,74 @@ def draw_text_plate(
     return Image.alpha_composite(base.convert("RGBA"), overlay)
 
 
+def split_emphasis(line: str) -> tuple[str, str]:
+    """
+    Возвращает:
+    emphasis = часть строки, которую рисуем bold
+    rest = остальная часть строки regular
+
+    Правило:
+    - если есть двоеточие в первой трети строки — bold всё до двоеточия включительно
+    - иначе bold первое слово
+    """
+
+    line = line.strip()
+
+    if not line:
+        return "", ""
+
+    colon_pos = line.find(":")
+
+    if colon_pos != -1 and colon_pos <= max(18, len(line) * 0.45):
+        return line[:colon_pos + 1], line[colon_pos + 1:].lstrip()
+
+    parts = line.split(" ", 1)
+
+    if len(parts) == 1:
+        return parts[0], ""
+
+    return parts[0], parts[1]
+
+
+def draw_mixed_weight_line(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    line: str,
+    regular_font: ImageFont.FreeTypeFont,
+    bold_font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+    emphasize: bool = False,
+) -> None:
+    """
+    Рисует строку с bold-акцентом в начале.
+    """
+
+    x, y = xy
+
+    if not emphasize:
+        draw.text((x, y), line, font=regular_font, fill=fill)
+        return
+
+    emphasis, rest = split_emphasis(line)
+
+    if not emphasis:
+        draw.text((x, y), line, font=regular_font, fill=fill)
+        return
+
+    draw.text((x, y), emphasis, font=bold_font, fill=fill)
+
+    bbox = draw.textbbox((0, 0), emphasis, font=bold_font)
+    emphasis_w = bbox[2] - bbox[0]
+
+    if rest:
+        draw.text(
+            (x + emphasis_w + 10, y),
+            rest,
+            font=regular_font,
+            fill=fill,
+        )
+
+
 def render_main_text(
     base: Image.Image,
     text: str,
@@ -515,18 +583,79 @@ def render_main_text(
 
     draw = ImageDraw.Draw(base)
 
-    font, lines, actual_size = fit_text_block(
+    regular_font, lines, actual_size = fit_text_block(
         draw=draw,
         text=prepared,
         preferred_size=cfg["font_size"],
         min_size=cfg["min_font_size"],
         max_width=cfg["width"],
         max_lines=cfg["max_lines"],
-        bold=cfg.get("bold", False),
+        bold=False,
     )
+
+    bold_font = load_font(actual_size, bold=True)
 
     if not lines:
         return base
+
+    line_height = int(actual_size * cfg["line_height"])
+
+    max_line_width = 0
+
+    for index, line in enumerate(lines):
+        if index == 0:
+            emphasis, rest = split_emphasis(line)
+            emphasis_bbox = draw.textbbox((0, 0), emphasis, font=bold_font)
+            emphasis_w = emphasis_bbox[2] - emphasis_bbox[0]
+
+            if rest:
+                rest_bbox = draw.textbbox((0, 0), rest, font=regular_font)
+                rest_w = rest_bbox[2] - rest_bbox[0]
+                line_w = emphasis_w + 10 + rest_w
+            else:
+                line_w = emphasis_w
+        else:
+            bbox = draw.textbbox((0, 0), line, font=regular_font)
+            line_w = bbox[2] - bbox[0]
+
+        max_line_width = max(max_line_width, line_w)
+
+    text_height = line_height * len(lines)
+
+    plate_x = cfg["x"] - cfg["plate_padding_x"]
+    plate_y = cfg["y"] - cfg["plate_padding_y"]
+    plate_w = max_line_width + cfg["plate_padding_x"] * 2
+    plate_h = text_height + cfg["plate_padding_y"] * 2
+
+    plate_w = min(plate_w, W - plate_x - 40)
+    plate_h = min(plate_h, H - plate_y - 40)
+
+    composed = draw_text_plate(
+        base=base,
+        x=plate_x,
+        y=plate_y,
+        w=plate_w,
+        h=plate_h,
+    )
+
+    draw = ImageDraw.Draw(composed)
+
+    cursor_y = cfg["y"]
+
+    for index, line in enumerate(lines):
+        draw_mixed_weight_line(
+            draw=draw,
+            xy=(cfg["x"], cursor_y),
+            line=line,
+            regular_font=regular_font,
+            bold_font=bold_font,
+            fill=STYLE_CONFIG["colors"]["white"],
+            emphasize=(index == 0),
+        )
+
+        cursor_y += line_height
+
+    return composed
 
     line_height = int(actual_size * cfg["line_height"])
 
