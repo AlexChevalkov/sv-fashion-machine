@@ -23,11 +23,7 @@ jobs:
       - name: Run Visual Production Bot
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          
           KREA_API_KEY: ${{ secrets.KREA_API_KEY }}
-          KREA_CREATE_URL: ${{ secrets.KREA_CREATE_URL }}
-          KREA_JOB_URL_TEMPLATE: ${{ secrets.KREA_JOB_URL_TEMPLATE }}
-          KREA_MODEL: ${{ secrets.KREA_MODEL }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: Visual Jobs
