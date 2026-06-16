@@ -2144,22 +2144,22 @@ def process_record(record: Dict[str, Any]) -> None:
         process_reel_brief_record(record)
         return
 
-        if status_value == STATUS_APPROVED:
-        if "Final reel with text generated" in output_links:
-            print("Final reel with text already generated. Skipping.")
-            return
+    if status_value == STATUS_APPROVED:
+    if "Final reel with text generated" in output_links:
+        print("Final reel with text already generated. Skipping.")
+        return
 
-        if "Final reel assembled" in output_links:
-            process_reel_text_overlay_record(record)
-            return
+    if "Final reel assembled" in output_links:
+        process_reel_text_overlay_record(record)
+        return
 
-        if "Reel motion clips generated" in output_links:
-            process_reel_assembly_record(record)
-            return
+    if "Reel motion clips generated" in output_links:
+        process_reel_assembly_record(record)
+        return
 
-        if "Reel keyframes generated" in output_links:
-            process_reel_motion_record(record)
-            return
+    if "Reel keyframes generated" in output_links:
+        process_reel_motion_record(record)
+        return
 
         process_reel_keyframes_record(record)
         return
