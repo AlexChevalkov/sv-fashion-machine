@@ -18,7 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install anthropic requests
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install anthropic requests pillow
 
       - name: Generate Visual Brief
         env:
