@@ -1505,34 +1505,32 @@ def process_record(record: Dict[str, Any]) -> None:
     print(f"Job title: {job_title}")
 
     status_value = safe_get(fields, "Visual Status", "").strip()
+
     format_value = (
         safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
     ).strip().lower()
 
-    # Reel-only branch:
-    # Queued          -> generate Reel Brief
-    # Approved Visual -> generate 9:16 keyframes
     if "reel" in format_value and "carousel" not in format_value:
-    output_links = safe_get(fields, "Output Links", "")
+        output_links = safe_get(fields, "Output Links", "")
 
-    if status_value == STATUS_QUEUED:
-    process_reel_brief_record(record)
-    return
-
-    if status_value == STATUS_APPROVED:
-        if "Reel motion clip generated" in output_links:
-            print("Reel motion clip already generated. Skipping.")
+        if status_value == STATUS_QUEUED:
+            process_reel_brief_record(record)
             return
 
-        if "Reel keyframes generated" in output_links:
-            process_reel_motion_record(record)
+        if status_value == STATUS_APPROVED:
+            if "Reel motion clip generated" in output_links:
+                print("Reel motion clip already generated. Skipping.")
+                return
+
+            if "Reel keyframes generated" in output_links:
+                process_reel_motion_record(record)
+                return
+
+            process_reel_keyframes_record(record)
             return
 
-        process_reel_keyframes_record(record)
+        print(f"Reel record is not actionable. Status: {status_value}")
         return
-
-    print(f"Reel record is not actionable. Status: {status_value}")
-    return
 
     try:
         # 1. Brief
@@ -1563,17 +1561,22 @@ def process_record(record: Dict[str, Any]) -> None:
             print(f"Rendering slide {slide_num}/{slide_count}")
             print("Prompt:", prompt)
 
-            job_id = create_krea_image_job(prompt=prompt, aspect_ratio=KREA_ASPECT_RATIO)
+            job_id = create_krea_image_job(
+                prompt=prompt,
+                aspect_ratio=KREA_ASPECT_RATIO,
+            )
             url = poll_krea_job(job_id)
 
             raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
             download_image(url, raw_path)
 
-            raw_items.append({
-                "slide": str(slide_num),
-                "url": url,
-                "job_id": job_id,
-            })
+            raw_items.append(
+                {
+                    "slide": str(slide_num),
+                    "url": url,
+                    "job_id": job_id,
+                }
+            )
 
         # 3. Assembly
         for idx in range(slide_count):
@@ -1624,7 +1627,6 @@ def process_record(record: Dict[str, Any]) -> None:
             },
         )
         raise
-
 def main() -> None:
     print("Visual Production Bot v2 started:", now_iso())
 
