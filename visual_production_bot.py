@@ -4,6 +4,7 @@ import json
 import math
 import time
 import subprocess
+import textwrap
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
@@ -1816,6 +1817,310 @@ Failed at:
             },
         )
 
+        raise   
+def clean_overlay_line(line: str) -> str:
+    line = line or ""
+    line = line.strip()
+
+    # remove bullets / numbering / timings
+    line = re.sub(r"^\s*[-•*]\s*", "", line)
+    line = re.sub(r"^\s*\d+[.)]\s*", "", line)
+    line = re.sub(r"^\s*(scene|shot)\s*\d+\s*[:.-]\s*", "", line, flags=re.IGNORECASE)
+    line = re.sub(r"^\s*\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек)\s*[:.-]\s*", "", line, flags=re.IGNORECASE)
+    line = re.sub(r"^\s*\d+:\d+\s*[-–]\s*\d+:\d+\s*[:.-]\s*", "", line)
+
+    line = line.strip(" \"'“”«»")
+    line = re.sub(r"\s+", " ", line).strip()
+
+    return line
+
+
+def wrap_overlay_text(text: str, width: int = 30, max_lines: int = 2) -> str:
+    text = clean_overlay_line(text)
+
+    if not text:
+        return ""
+
+    wrapped = textwrap.wrap(
+        text,
+        width=width,
+        break_long_words=False,
+        replace_whitespace=False,
+    )
+
+    wrapped = wrapped[:max_lines]
+
+    return "\n".join(wrapped)
+
+
+def parse_on_screen_texts(fields: Dict[str, Any], count: int = 3) -> List[str]:
+    raw = safe_get(fields, "On-screen Text", "")
+    reel_hook = safe_get(fields, "Reel Hook", "")
+
+    candidates: List[str] = []
+
+    if raw.strip():
+        # Split by lines first
+        parts = re.split(r"[\n\r]+", raw)
+
+        for part in parts:
+            part = clean_overlay_line(part)
+            if part:
+                candidates.append(part)
+
+    # If the field came as one paragraph, split into sentence-like fragments
+    if len(candidates) < count and raw.strip():
+        sentence_parts = re.split(r"(?<=[.!?])\s+", raw)
+        for part in sentence_parts:
+            part = clean_overlay_line(part)
+            if part and part not in candidates:
+                candidates.append(part)
+
+    if reel_hook and reel_hook not in candidates:
+        candidates.insert(0, clean_overlay_line(reel_hook))
+
+    fallback = [
+        "Luxury creates distance.",
+        "You want to shorten it.",
+        "Distance is the product.",
+    ]
+
+    for item in fallback:
+        if len(candidates) >= count:
+            break
+        candidates.append(item)
+
+    final_texts = []
+
+    for text in candidates:
+        text = wrap_overlay_text(text, width=30, max_lines=2)
+        if text:
+            final_texts.append(text)
+
+        if len(final_texts) >= count:
+            break
+
+    return final_texts[:count]
+
+
+def write_drawtext_file(text: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    path = output_dir / filename
+    path.write_text(text, encoding="utf-8")
+
+    return str(path.resolve())
+
+
+def add_on_screen_text_to_reel(
+    input_video_path: str,
+    overlay_texts: List[str],
+    output_filename: str = "final_reel_text_v1.mp4",
+) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / output_filename
+
+    text_files = []
+
+    for idx, text in enumerate(overlay_texts, start=1):
+        text_files.append(
+            write_drawtext_file(
+                text=text,
+                filename=f"onscreen_text_{idx:02d}.txt",
+            )
+        )
+
+    # 15 sec reel = 3 clips x 5 sec
+    time_ranges = [
+        (0, 5),
+        (5, 10),
+        (10, 15),
+    ]
+
+    draw_filters = []
+
+    for idx, text_file in enumerate(text_files):
+        start, end = time_ranges[idx]
+
+        draw_filters.append(
+            "drawtext="
+            f"fontfile='{FONT_BOLD}':"
+            f"textfile='{text_file}':"
+            f"enable='between(t,{start},{end})':"
+            "x=80:"
+            "y=h*0.68:"
+            "fontsize=58:"
+            "fontcolor=white:"
+            "line_spacing=8:"
+            "box=1:"
+            "boxcolor=black@0.30:"
+            "boxborderw=26"
+        )
+
+    filter_chain = ",".join(draw_filters)
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_video_path,
+        "-vf",
+        filter_chain,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        str(output_path),
+    ]
+
+    print("Running ffmpeg text overlay:")
+    print(" ".join(command))
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    print("ffmpeg stdout:")
+    print(result.stdout)
+    print("ffmpeg stderr:")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg text overlay failed with code {result.returncode}")
+
+    print("Final reel with text created:", output_path)
+
+    return str(output_path)
+
+
+def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Text Overlay Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Text Overlay Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        # Re-download the 3 motion clips and assemble again in this runner
+        clips = extract_reel_motion_clip_urls(existing_links)
+
+        local_clip_paths = []
+
+        for item in clips:
+            index = int(item["index"])
+            name = item["name"]
+            url = item["url"]
+
+            local_path = download_motion_clip(
+                video_url=url,
+                filename=f"text_source_motion_clip_{index:02d}_{name}.mp4",
+            )
+
+            local_clip_paths.append(local_path)
+
+        final_reel_path = assemble_reel_with_ffmpeg(
+            clip_paths=local_clip_paths,
+            output_filename="final_reel_v1_for_text.mp4",
+        )
+
+        overlay_texts = parse_on_screen_texts(fields, count=3)
+
+        print("Overlay texts:")
+        for idx, text in enumerate(overlay_texts, start=1):
+            print(f"{idx}: {text}")
+
+        final_text_reel_path = add_on_screen_text_to_reel(
+            input_video_path=final_reel_path,
+            overlay_texts=overlay_texts,
+            output_filename="final_reel_text_v1.mp4",
+        )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel with text generated:")
+        output_lines.append(f"Local file: {final_text_reel_path}")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Text Overlay Mode completed.
+
+Created final_reel_text_v1.mp4.
+Added 3 on-screen text overlays.
+No voiceover yet.
+No music yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel with text generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Text Overlay Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Text Overlay Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
         raise        
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
@@ -1839,9 +2144,13 @@ def process_record(record: Dict[str, Any]) -> None:
         process_reel_brief_record(record)
         return
 
-    if status_value == STATUS_APPROVED:
+        if status_value == STATUS_APPROVED:
+        if "Final reel with text generated" in output_links:
+            print("Final reel with text already generated. Skipping.")
+            return
+
         if "Final reel assembled" in output_links:
-            print("Final reel already assembled. Skipping.")
+            process_reel_text_overlay_record(record)
             return
 
         if "Reel motion clips generated" in output_links:
