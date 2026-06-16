@@ -986,31 +986,25 @@ def clean_krea_direction(text: str) -> str:
 def extract_krea_prompt_sections(prompt_pack: str) -> Dict[str, str]:
     text = prompt_pack or ""
 
-    labels = [
-        "cover frame",
-        "cover",
-        "scene 1",
-        "scene 2",
-        "scene 3",
-        "final frame",
-        "final",
-    ]
+    pattern = (
+        r"(?im)^\s*"
+        r"(cover frame|cover|scene 1|scene 2|scene 3|scene 4|scene 5|scene 6|final frame|final)"
+        r"\s*:\s*"
+    )
 
-    sections: Dict[str, str] = {}
-
-    pattern = r"(?im)^\s*(cover frame|cover|scene 1|scene 2|scene 3|final frame|final)\s*:\s*"
     matches = list(re.finditer(pattern, text))
 
     if not matches:
         return {"all": clean_krea_direction(text)}
+
+    sections: Dict[str, str] = {}
 
     for idx, match in enumerate(matches):
         label = match.group(1).lower().strip()
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
 
-        value = text[start:end].strip()
-        value = clean_krea_direction(value)
+        value = clean_krea_direction(text[start:end])
 
         if value:
             sections[label] = value
@@ -1018,16 +1012,101 @@ def extract_krea_prompt_sections(prompt_pack: str) -> Dict[str, str]:
     return sections
 
 
-def pick_krea_direction(sections: Dict[str, str], choices: List[str], fallback: str) -> str:
-    for choice in choices:
-        value = sections.get(choice)
-        if value:
-            return value
+def build_six_krea_directions(prompt_pack: str) -> List[Dict[str, str]]:
+    sections = extract_krea_prompt_sections(prompt_pack)
 
-    return fallback
+    preferred_order = [
+        ("frame_01_start", ["cover frame", "cover", "scene 1"]),
+        ("frame_02_color_code", ["scene 1", "scene 2"]),
+        ("frame_03_object_code", ["scene 2", "scene 3"]),
+        ("frame_04_extra", ["scene 3", "scene 4"]),
+        ("frame_05_material_fragment", ["scene 4", "scene 3", "scene 2"]),
+        ("frame_06_final", ["final frame", "final", "scene 5", "scene 6"]),
+    ]
+
+    fallback = sections.get("all") or "Minimal editorial fashion-media still life, negative space, controlled light, no people, no text."
+
+    results: List[Dict[str, str]] = []
+
+    used_directions = []
+
+    for name, labels in preferred_order:
+        direction = ""
+
+        for label in labels:
+            if sections.get(label):
+                direction = sections[label]
+                break
+
+        if not direction:
+            # Try to use any unused section before falling back.
+            for section_label, section_value in sections.items():
+                if section_label == "all":
+                    continue
+                if section_value not in used_directions:
+                    direction = section_value
+                    break
+
+        if not direction:
+            direction = fallback
+
+        used_directions.append(direction)
+
+        results.append(
+            {
+                "name": name,
+                "direction": direction,
+            }
+        )
+
+    return results[:6]
 
 
-def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
+def format_generated_keyframe_prompts(prompts: List[Dict[str, str]]) -> str:
+    lines = []
+
+    for idx, item in enumerate(prompts, start=1):
+        lines.append(f"KEYFRAME {idx} — {item['name']}")
+        lines.append("")
+        lines.append(item["prompt"])
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def parse_selected_frame_order_text(text: str, max_frame: int) -> List[int]:
+    text = text or ""
+    numbers = re.findall(r"\d+", text)
+
+    result: List[int] = []
+    seen = set()
+
+    for number_text in numbers:
+        number = int(number_text)
+
+        if number < 1 or number > max_frame:
+            continue
+
+        if number in seen:
+            continue
+
+        seen.add(number)
+        result.append(number)
+
+    if not result:
+        return list(range(1, max_frame + 1))
+
+    return result
+
+
+def get_selected_frame_order(fields: Dict[str, Any], max_frame: int) -> List[int]:
+    selected_text = safe_get(fields, "Selected Frame Order", "")
+    return parse_selected_frame_order_text(selected_text, max_frame=max_frame)
+
+
+def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> List[Dict[str, str]]:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
     source_hook = safe_get(fields, "Source Hook")
     visual_hook = safe_get(fields, "Visual Hook")
@@ -1035,27 +1114,7 @@ def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     reel_hook = safe_get(fields, "Reel Hook")
     krea_prompt_pack = safe_get(fields, "Krea Prompt Pack")
 
-    sections = extract_krea_prompt_sections(krea_prompt_pack)
-
-    fallback_direction = clean_krea_direction(krea_prompt_pack)
-
-    start_direction = pick_krea_direction(
-        sections,
-        ["cover frame", "cover", "scene 1"],
-        fallback_direction,
-    )
-
-    middle_direction = pick_krea_direction(
-        sections,
-        ["scene 2", "scene 1", "scene 3"],
-        fallback_direction,
-    )
-
-    final_direction = pick_krea_direction(
-        sections,
-        ["final frame", "final", "scene 3"],
-        fallback_direction,
-    )
+    directions = build_six_krea_directions(krea_prompt_pack)
 
     shared_rules = f"""
 Create ONE single full-screen vertical photograph.
@@ -1110,74 +1169,40 @@ Reel hook:
 {reel_hook}
 """.strip()
 
-    return [
-        {
-            "name": "start",
-            "prompt": f"""
+    prompts: List[Dict[str, str]] = []
+
+    for idx, item in enumerate(directions, start=1):
+        name = item["name"]
+        direction = item["direction"]
+
+        prompt = f"""
 {shared_rules}
 
-START IMAGE:
+KEYFRAME {idx}:
 Use ONLY this visual direction for this image:
-{start_direction}
+{direction}
 
-Create the opening visual for this specific topic.
-The image must express the main idea of the current record.
-Large empty space.
-Strong editorial restraint.
-A feeling of distance, intelligence and visual control.
+Create one specific image for this current topic.
+Do not combine it with other scenes.
+Do not add other directions.
+Do not create variations inside the same image.
+The image must be clear, editorial, restrained and usable as one reel segment.
 
 One continuous vertical photograph.
 No collage.
 No panels.
 No sequence.
 No multiple scenes.
-""".strip(),
-        },
-        {
-            "name": "middle",
-            "prompt": f"""
-{shared_rules}
+""".strip()
 
-MIDDLE IMAGE:
-Use ONLY this visual direction for this image:
-{middle_direction}
+        prompts.append(
+            {
+                "name": name,
+                "prompt": prompt,
+            }
+        )
 
-Create the second visual for this specific topic.
-Make it closer, more analytical, more tactile or more conceptual than the opening image.
-Use material, framing, light, surface, shadow, color or composition to develop the idea.
-It should feel like the visual argument is becoming sharper.
-
-One continuous vertical photograph.
-No collage.
-No panels.
-No sequence.
-No multiple scenes.
-""".strip(),
-        },
-        {
-            "name": "final",
-            "prompt": f"""
-{shared_rules}
-
-FINAL IMAGE:
-Use ONLY this visual direction for this image:
-{final_direction}
-
-Create the final visual for this specific topic.
-It should feel like a quiet conclusion.
-More empty space than information.
-A controlled, intelligent, editorial final frame.
-The image should leave an aftertaste, not explain everything literally.
-
-One continuous vertical photograph.
-No collage.
-No panels.
-No storyboard.
-No multiple images inside the frame.
-""".strip(),
-        },
-    ]
-
+    return prompts
 
 def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
