@@ -967,119 +967,123 @@ def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     visual_hook = safe_get(fields, "Visual Hook")
     visual_concept = safe_get(fields, "Visual Concept")
     reel_hook = safe_get(fields, "Reel Hook")
-    krea_prompt_pack = safe_get(fields, "Krea Prompt Pack")
-    shot_list = safe_get(fields, "Shot List")
-    on_screen_text = safe_get(fields, "On-screen Text")
 
-    base_style = f"""
-SV Fashion Media reel keyframe.
+    shared_rules = f"""
+Create ONE single full-screen vertical photograph.
 
-Create ONE SINGLE vertical 9:16 image.
-This must be one continuous photographic frame, not a collage.
-No storyboard.
-No contact sheet.
-No split screen.
-No multiple panels.
-No multiple frames inside the image.
-No grid layout.
-No four-scene composition.
+This is not a storyboard.
+This is not a moodboard.
+This is not a contact sheet.
+This is not a collage.
+This is not a sequence.
+This is not a set of images.
+
+The entire 9:16 canvas must be one continuous photographic image from top to bottom.
+One camera angle only.
+One composition only.
+One visual subject only.
 No horizontal strips.
-No before-after layout.
+No panels.
+No grid.
+No split screen.
+No multiple moments.
+No multiple scenes inside the same image.
 
+Editorial fashion still life.
 Quiet luxury.
-Editorial intelligence.
-Negative space.
-Cold light, matte surfaces, controlled shadows.
-The image must feel like a deliberate fashion editorial symbol, not stock photography.
+Cold diffused light.
+Matte textures.
+Stone, plaster, linen, paper, leather.
+Large negative space.
+Premium magazine image.
 No text inside the image.
+No letters.
 No logos.
-No fake brand names.
-No random letters.
-No people unless absolutely necessary.
-No glossy catalogue look.
-No TikTok visual noise.
-Leave clear empty space for on-screen typography.
+No people.
+No hands.
+No model.
+No product catalogue feeling.
+No advertising layout.
 
-Topic:
-{title}
-
-Visual Hook:
-{visual_hook}
-
-Visual Concept:
-{visual_concept}
-
-Reel Hook:
-{reel_hook}
-
-Shot List:
-{shot_list}
-
-On-screen Text:
-{on_screen_text}
-
-Existing Krea Prompt Pack:
-{krea_prompt_pack}
+Topic: {title}
+Visual idea: {visual_hook}
+Concept: {visual_concept}
+Opening thought: {reel_hook}
 """.strip()
 
     return [
         {
             "name": "start",
             "prompt": f"""
-{base_style}
+{shared_rules}
 
-KEYFRAME 1 — START FRAME:
-One single vertical fashion editorial photograph.
-A symbolic fashion object placed in a large empty space.
-The object should feel distant, desirable, controlled.
-Minimal composition.
-One camera angle only.
-One scene only.
-No collage.
+Make a single vertical editorial photograph of one small beige leather handbag placed far away in a large empty studio space.
+
+The handbag is centered horizontally, low in the frame.
+Most of the image is empty cold grey space.
+Soft background gradient.
+No other objects.
+No fabric.
+No glove.
+No detail shots.
+No second image.
 No panels.
-No sequence.
-Premium editorial still life.
-Strong negative space for the first on-screen phrase.
+No collage.
+
+The feeling: distance, silence, desire, control.
+The image must look like one premium fashion magazine still life.
 """.strip(),
         },
         {
             "name": "middle",
             "prompt": f"""
-{base_style}
+{shared_rules}
 
-KEYFRAME 2 — MIDDLE FRAME:
-One single vertical fashion editorial photograph.
-A close but still spacious composition.
-Use material, surface, shadow, texture and object placement to show tension.
-The image should feel slightly more intimate than the first frame, but still restrained.
-One object or one object detail only.
-One scene only.
-No collage.
+Make a single vertical editorial photograph of one close-up detail of the same beige leather handbag.
+
+Only one continuous macro composition:
+a leather edge, a clasp, stitching, or a metal ring.
+The detail occupies the lower third of the image.
+The upper two thirds are clean empty negative space.
+Cold light.
+Sharp leather texture.
+Deep controlled shadow.
+
+No other objects.
+No fabric.
+No glove.
+No multiple details.
 No panels.
-No sequence.
-No multiple images inside the frame.
+No collage.
+No storyboard.
+No horizontal strips.
 """.strip(),
         },
         {
             "name": "final",
             "prompt": f"""
-{base_style}
+{shared_rules}
 
-KEYFRAME 3 — FINAL FRAME:
-One single vertical fashion editorial photograph.
-The frame should feel like a quiet conclusion.
-A single object or symbolic arrangement on stone, paper, linen or plaster.
-More empty space than visual information.
-Editorial finality.
-One scene only.
-No collage.
+Make a single vertical editorial photograph of one beige leather handbag placed almost at the edge of a pale stone surface.
+
+The bag is partly visible, not centered.
+Most of the image is empty stone surface and cold light.
+Very restrained.
+Very quiet.
+Editorial final frame feeling.
+
+One object only.
+One continuous photograph.
+No fabric.
+No glove.
+No multiple shots.
 No panels.
+No collage.
 No storyboard.
-No multiple images inside the frame.
+No horizontal strips.
 """.strip(),
         },
     ]
-
 
 def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
