@@ -1822,14 +1822,43 @@ def clean_overlay_line(line: str) -> str:
     line = line or ""
     line = line.strip()
 
-    # remove bullets / numbering / timings
+    # remove bullets / numbering
     line = re.sub(r"^\s*[-•*]\s*", "", line)
     line = re.sub(r"^\s*\d+[.)]\s*", "", line)
-    line = re.sub(r"^\s*(scene|shot)\s*\d+\s*[:.-]\s*", "", line, flags=re.IGNORECASE)
-    line = re.sub(r"^\s*\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек)\s*[:.-]\s*", "", line, flags=re.IGNORECASE)
-    line = re.sub(r"^\s*\d+:\d+\s*[-–]\s*\d+:\d+\s*[:.-]\s*", "", line)
 
-    line = line.strip(" \"'“”«»")
+    # remove scene / shot labels
+    line = re.sub(
+        r"^\s*(scene|shot|сцена|кадр)\s*\d+\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    # remove timecodes at the beginning:
+    # 0-3 sec:, 3–8 sec:, 0:03-0:08:, etc.
+    line = re.sub(
+        r"^\s*\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек|секунд)\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    line = re.sub(
+        r"^\s*\d+:\d+\s*[-–]\s*\d+:\d+\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    # remove accidental remaining internal timecode
+    line = re.sub(
+        r"\b\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек|секунд)\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    line = line.strip(" \"'“”«»|")
     line = re.sub(r"\s+", " ", line).strip()
 
     return line
@@ -1860,29 +1889,26 @@ def parse_on_screen_texts(fields: Dict[str, Any], count: int = 3) -> List[str]:
     candidates: List[str] = []
 
     if raw.strip():
-        # Split by lines first
-        parts = re.split(r"[\n\r]+", raw)
+        # Important: Claude often separates reel text with pipes or semicolons:
+        # "0-3 sec: ... | 3-8 sec: ..."
+        normalized = raw.replace("|", "\n").replace(";", "\n")
+
+        parts = re.split(r"[\n\r]+", normalized)
 
         for part in parts:
             part = clean_overlay_line(part)
             if part:
                 candidates.append(part)
 
-    # If the field came as one paragraph, split into sentence-like fragments
-    if len(candidates) < count and raw.strip():
-        sentence_parts = re.split(r"(?<=[.!?])\s+", raw)
-        for part in sentence_parts:
-            part = clean_overlay_line(part)
-            if part and part not in candidates:
-                candidates.append(part)
-
-    if reel_hook and reel_hook not in candidates:
-        candidates.insert(0, clean_overlay_line(reel_hook))
+    if reel_hook:
+        clean_hook = clean_overlay_line(reel_hook)
+        if clean_hook and clean_hook not in candidates:
+            candidates.insert(0, clean_hook)
 
     fallback = [
-        "Luxury creates distance.",
-        "You want to shorten it.",
-        "Distance is the product.",
+        "Luxury не просит тебя купить.",
+        "Они создают пространство.",
+        "Дистанция и есть продукт.",
     ]
 
     for item in fallback:
@@ -1890,11 +1916,12 @@ def parse_on_screen_texts(fields: Dict[str, Any], count: int = 3) -> List[str]:
             break
         candidates.append(item)
 
-    final_texts = []
+    final_texts: List[str] = []
 
     for text in candidates:
         text = wrap_overlay_text(text, width=30, max_lines=2)
-        if text:
+
+        if text and text not in final_texts:
             final_texts.append(text)
 
         if len(final_texts) >= count:
