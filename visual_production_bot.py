@@ -60,6 +60,7 @@ STATUS_QUEUED = "Queued"
 STATUS_RENDERING = "In Production"
 STATUS_NEEDS_REVIEW = "Needs Visual Review"
 STATUS_APPROVED = "Approved Visual"
+STATUS_READY_FOR_BUFFER = "Ready for Buffer"
 STATUS_ERROR = "Failed"
 
 
@@ -2371,7 +2372,185 @@ def create_reel_cover_from_keyframe(
 
     print("Reel cover created:", output_path)
 
-    return str(output_path)        
+    return str(output_path)
+def generate_final_reel_caption(record: Dict[str, Any]) -> Dict[str, Any]:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    fields = record.get("fields", {})
+
+    source_title = safe_get(fields, "Source Post Title")
+    reel_hook = safe_get(fields, "Reel Hook")
+    reel_script = safe_get(fields, "Reel Script")
+    overlay_1 = safe_get(fields, "Overlay 1")
+    overlay_2 = safe_get(fields, "Overlay 2")
+    overlay_3 = safe_get(fields, "Overlay 3")
+    visual_concept = safe_get(fields, "Visual Concept")
+
+    system_prompt = f"""
+Ты — fashion editor и автор Instagram caption для {BRAND_NAME}.
+
+Стиль:
+- умно
+- сухо
+- точно
+- без глянцевой восторженности
+- без emoji
+- без продажного тона
+- без "вдохновляемся"
+- без "must-have"
+- без дешёвых hashtags
+
+Формат:
+короткий Instagram caption для fashion-media reel.
+"""
+
+    user_prompt = f"""
+Сделай caption к Instagram Reel.
+
+Контекст:
+Source title: {source_title}
+
+Reel hook:
+{reel_hook}
+
+Visual concept:
+{visual_concept}
+
+Reel script:
+{reel_script}
+
+On-screen text:
+1. {overlay_1}
+2. {overlay_2}
+3. {overlay_3}
+
+Верни строго валидный JSON без markdown.
+
+Схема:
+{{
+  "final_reel_caption": "готовый caption на русском"
+}}
+
+Требования к caption:
+- 5–9 коротких строк
+- без emoji
+- без hashtags
+- без прямой продажи
+- звучит как короткая fashion-media колонка
+- тема: luxury, дистанция, желание, недоступность как язык бренда
+- финальная строка должна быть сильной, но не пафосной
+"""
+
+    message = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=1200,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    response_text = message.content[0].text
+
+    print("Claude final reel caption raw response:")
+    print(response_text)
+
+    data = extract_json(response_text)
+
+    if "final_reel_caption" not in data:
+        raise ValueError("Claude response missing final_reel_caption")
+
+    data["final_reel_caption"] = str(data["final_reel_caption"]).strip()
+
+    return data
+
+
+def process_reel_caption_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Final Reel Caption Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Final Reel Caption Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        caption_data = generate_final_reel_caption(record)
+        final_caption = caption_data["final_reel_caption"]
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel caption generated:")
+        output_lines.append("Stored in Airtable field: Final Reel Caption")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Final Reel Caption": final_caption,
+                "Visual Status": STATUS_READY_FOR_BUFFER,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Final Reel Caption Mode completed.
+
+Final Reel Caption generated.
+Reel package is ready for Buffer / manual posting.
+
+Status moved to Ready for Buffer.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel caption generated and moved to Ready for Buffer.")
+        print("Final caption:")
+        print(final_caption)
+
+    except Exception as exc:
+        print("Final Reel Caption Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Final Reel Caption Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise    
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record["fields"]
@@ -2395,8 +2574,12 @@ def process_record(record: Dict[str, Any]) -> None:
             return
 
         if status_value == STATUS_APPROVED:
+            if "Final reel caption generated" in output_links:
+                print("Final reel caption already generated. Skipping.")
+                return
+
             if "Final reel with text generated" in output_links:
-                print("Final reel with text already generated. Skipping.")
+                process_reel_caption_record(record)
                 return
 
             if "Final reel assembled" in output_links:
@@ -2413,9 +2596,6 @@ def process_record(record: Dict[str, Any]) -> None:
 
             process_reel_keyframes_record(record)
             return
-
-        print(f"Reel record is not actionable. Status: {status_value}")
-        return
 
     try:
         # 1. Brief
