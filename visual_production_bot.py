@@ -1204,35 +1204,177 @@ No multiple scenes.
 
     return prompts
 
+def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Keyframes Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Keyframes Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        prompts = build_reel_keyframe_prompts(fields)
+        prompt_log = format_generated_keyframe_prompts(prompts)
+        selected_order = get_selected_frame_order(fields, max_frame=len(prompts))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Generated Keyframe Prompts": prompt_log,
+                "Generated Keyframe Count": len(prompts),
+                "Final Frame Count": len(selected_order),
+            },
+        )
+
+        results = []
+
+        for index, item in enumerate(prompts, start=1):
+            name = item["name"]
+            prompt = item["prompt"]
+
+            print("=" * 80)
+            print(f"Rendering reel keyframe {index}: {name}")
+            print(prompt)
+
+            job_id = create_krea_image_job(
+                prompt=prompt,
+                aspect_ratio="9:16",
+            )
+
+            image_url = poll_krea_job(job_id)
+
+            local_path = download_reel_image(
+                image_url=image_url,
+                filename=f"reel_keyframe_{index:02d}_{name}.png",
+            )
+
+            results.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "image_url": image_url,
+                    "job_id": job_id,
+                    "local_path": local_path,
+                }
+            )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Reel keyframes generated:")
+
+        for item in results:
+            output_lines.append(
+                f"Keyframe {item['index']} — {item['name']}: {item['image_url']} | job_id: {item['job_id']}"
+            )
+
+        output_lines.append("")
+        output_lines.append(f"Generated keyframe count: {len(results)}")
+        output_lines.append(f"Selected frame order: {','.join(str(x) for x in selected_order)}")
+        output_lines.append(f"Final frame count: {len(selected_order)}")
+        output_lines.append("")
+        output_lines.append("Artifact: visual-production-output")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Generated Keyframe Prompts": prompt_log,
+                "Generated Keyframe Count": len(results),
+                "Final Frame Count": len(selected_order),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Keyframes Mode completed.
+
+Generated {len(results)} vertical 9:16 keyframes.
+Selected frame order for motion/reel:
+{','.join(str(x) for x in selected_order)}
+
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Reel keyframes generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Keyframes Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Keyframes Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise
+
 def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
     reel_hook = safe_get(fields, "Reel Hook")
     visual_concept = safe_get(fields, "Visual Concept")
 
     return f"""
-Create a 5 second vertical fashion editorial video from the provided start image.
+Create a 5 second vertical fashion-editorial video from the provided start image.
 
 ABSOLUTE RULE:
 The provided image is the locked visual reference.
 Do not redesign it.
 Do not reinterpret it.
-Do not change the object.
+Do not change the main subject.
 Do not change the composition.
-Do not change the material.
-Do not change the shape.
+Do not change the material logic.
+Do not change the shape language.
 Do not add new objects.
 
 The video must preserve:
-- the exact handbag / object identity
-- the same silhouette
-- the same leather texture
-- the same stitching
-- the same metal hardware
+- the exact visual subject / still-life identity
+- the same silhouette or geometric structure
+- the same material texture
 - the same color palette
 - the same background
 - the same negative space
 - the same lighting mood
-- the same editorial still-life atmosphere
+- the same editorial atmosphere
+- the same visual concept
 
 Allowed movement only:
 - extremely slow camera push-in
@@ -1246,10 +1388,10 @@ Forbidden:
 - no morphing
 - no transformation
 - no object deformation
-- no new fabric
-- no extra folds
+- no new fabric unless it already exists in the source image
+- no extra folds unless they already exist in the source image
 - no additional accessories
-- no new handbag parts
+- no new subject
 - no people
 - no hands
 - no model
@@ -1267,7 +1409,7 @@ Forbidden:
 - no fantasy effect
 
 The video should feel like:
-a moving fashion magazine still life,
+a moving fashion-media still life,
 quiet luxury,
 editorial intelligence,
 distance,
@@ -1285,7 +1427,7 @@ Reel hook:
 
 Final direction:
 Make the image feel alive only through camera and atmosphere.
-The object itself must remain stable and unchanged.
+The visual subject itself must remain stable and unchanged.
 """.strip()
 
 
@@ -1402,6 +1544,38 @@ def download_reel_video(video_url: str, filename: str) -> str:
     return str(output_path)
 
 
+def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
+    text = output_links or ""
+
+    pattern = r"Keyframe\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError("Could not find reel keyframe image URLs in Output Links")
+
+    seen = set()
+    results: List[Dict[str, str]] = []
+
+    for index_text, url in matches:
+        index = int(index_text)
+
+        if index in seen:
+            continue
+
+        seen.add(index)
+
+        results.append(
+            {
+                "index": str(index),
+                "name": f"keyframe_{index:02d}",
+                "url": url.strip().rstrip(".,)"),
+            }
+        )
+
+    results.sort(key=lambda item: int(item["index"]))
+
+    return results
+
 def process_reel_motion_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record.get("fields", {})
@@ -1425,28 +1599,46 @@ def process_reel_motion_record(record: Dict[str, Any]) -> None:
             },
         )
 
-        keyframes = extract_reel_keyframe_urls(existing_links)
+        all_keyframes = extract_reel_keyframe_urls(existing_links)
+        selected_order = get_selected_frame_order(fields, max_frame=len(all_keyframes))
+
+        keyframe_by_index = {
+            int(item["index"]): item
+            for item in all_keyframes
+        }
+
+        selected_keyframes = [
+            keyframe_by_index[index]
+            for index in selected_order
+            if index in keyframe_by_index
+        ]
+
+        if not selected_keyframes:
+            raise RuntimeError(
+                f"No selected keyframes found. selected_order={selected_order}, available={all_keyframes}"
+            )
 
         base_prompt = build_reel_motion_prompt(fields)
 
         results = []
 
-        for item in keyframes:
-            index = item["index"]
+        for sequence_index, item in enumerate(selected_keyframes, start=1):
+            original_index = item["index"]
             name = item["name"]
             start_image_url = item["url"]
 
             prompt = f"""
 {base_prompt}
 
-This motion clip is based on keyframe {index}: {name}.
+This motion clip is based on selected reel frame {sequence_index}.
+Original keyframe number: {original_index}.
 Create only this one short segment.
 Preserve this exact source image.
 Do not introduce visual elements from other keyframes.
 """.strip()
 
             print("=" * 80)
-            print(f"Rendering reel motion clip {index}: {name}")
+            print(f"Rendering reel motion clip {sequence_index}: original keyframe {original_index}")
             print("Using start image URL:", start_image_url)
             print("Motion prompt:")
             print(prompt)
@@ -1461,12 +1653,13 @@ Do not introduce visual elements from other keyframes.
 
             local_path = download_reel_video(
                 video_url=video_url,
-                filename=f"reel_motion_clip_{int(index):02d}_{name}.mp4",
+                filename=f"reel_motion_clip_{sequence_index:02d}_from_keyframe_{original_index}.mp4",
             )
 
             results.append(
                 {
-                    "index": index,
+                    "sequence_index": sequence_index,
+                    "original_keyframe_index": original_index,
                     "name": name,
                     "video_url": video_url,
                     "job_id": job_id,
@@ -1486,10 +1679,13 @@ Do not introduce visual elements from other keyframes.
 
         for item in results:
             output_lines.append(
-                f"Motion clip {item['index']} — {item['name']}: {item['video_url']} | job_id: {item['job_id']}"
+                f"Motion clip {item['sequence_index']} — from keyframe {item['original_keyframe_index']}: {item['video_url']} | job_id: {item['job_id']}"
             )
             output_lines.append(f"Local file: {item['local_path']}")
 
+        output_lines.append("")
+        output_lines.append(f"Selected frame order: {','.join(str(x) for x in selected_order)}")
+        output_lines.append(f"Final frame count: {len(results)}")
         output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
@@ -1499,17 +1695,16 @@ Do not introduce visual elements from other keyframes.
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
+                "Final Frame Count": len(results),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Motion Mode completed.
 
-Generated 3 vertical 5 sec motion clips:
-1. Start
-2. Middle
-3. Final
+Generated {len(results)} vertical 5 sec motion clips.
+Selected frame order:
+{','.join(str(x) for x in selected_order)}
 
-No final reel assembly yet.
 Status moved to Needs Visual Review.
 
 Generated at:
@@ -1519,7 +1714,7 @@ Generated at:
             },
         )
 
-        print("Done. 3 reel motion clips generated and moved to Needs Visual Review.")
+        print(f"Done. {len(results)} reel motion clips generated and moved to Needs Visual Review.")
 
     except Exception as exc:
         print("Reel Motion Mode failed:", repr(exc))
@@ -1564,31 +1759,17 @@ def extract_reel_motion_clip_urls(output_links: str) -> List[Dict[str, str]]:
 
         seen.add(index)
 
-        if index == 1:
-            name = "start"
-        elif index == 2:
-            name = "middle"
-        elif index == 3:
-            name = "final"
-        else:
-            name = f"extra_{index}"
-
         results.append(
             {
                 "index": str(index),
-                "name": name,
+                "name": f"motion_clip_{index:02d}",
                 "url": url.strip().rstrip(".,)"),
             }
         )
 
     results.sort(key=lambda item: int(item["index"]))
 
-    if len(results) < 3:
-        raise RuntimeError(
-            f"Expected 3 reel motion clip URLs, found {len(results)}: {results}"
-        )
-
-    return results[:3]
+    return results
 
 
 def download_motion_clip(video_url: str, filename: str) -> str:
@@ -1711,6 +1892,8 @@ def process_reel_assembly_record(record: Dict[str, Any]) -> None:
 
         output_lines.append("Final reel assembled:")
         output_lines.append(f"Local file: {final_reel_path}")
+        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
+        output_lines.append(f"Approx duration seconds: {len(local_clip_paths) * 5}")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -1719,12 +1902,13 @@ def process_reel_assembly_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
+                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Assembly Mode completed.
 
-Assembled 3 motion clips into final_reel_v1.mp4.
+Assembled {len(local_clip_paths)} motion clips into final_reel_v1.mp4.
 No text overlay yet.
 No voiceover yet.
 Status moved to Needs Visual Review.
@@ -1760,7 +1944,7 @@ Failed at:
             },
         )
 
-        raise   
+        raise
 def clean_overlay_line(line: str) -> str:
     line = line or ""
     line = line.strip()
@@ -1970,6 +2154,7 @@ def add_on_screen_text_to_reel(
     input_video_path: str,
     overlay_texts: List[str],
     output_filename: str = "final_reel_text_v1.mp4",
+    total_duration_seconds: float | None = None,
 ) -> str:
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
@@ -1986,23 +2171,26 @@ def add_on_screen_text_to_reel(
             )
         )
 
-    # 15 sec reel = 3 clips x 5 sec
-    time_ranges = [
-        (0, 5),
-        (5, 10),
-        (10, 15),
-    ]
+    if not total_duration_seconds:
+        total_duration_seconds = get_video_duration_seconds(input_video_path)
+
+    if not total_duration_seconds:
+        total_duration_seconds = 15.0
+
+    text_count = max(1, len(text_files))
+    segment_duration = total_duration_seconds / text_count
 
     draw_filters = []
 
     for idx, text_file in enumerate(text_files):
-        start, end = time_ranges[idx]
+        start = idx * segment_duration
+        end = total_duration_seconds if idx == text_count - 1 else (idx + 1) * segment_duration
 
         draw_filters.append(
             "drawtext="
             f"fontfile='{FONT_BOLD}':"
             f"textfile='{text_file}':"
-            f"enable='between(t,{start},{end})':"
+            f"enable='between(t,{start:.2f},{end:.2f})':"
             "x=80:"
             "y=h*0.68:"
             "fontsize=58:"
@@ -2080,7 +2268,6 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             },
         )
 
-        # Re-download the 3 motion clips and assemble again in this runner
         clips = extract_reel_motion_clip_urls(existing_links)
 
         local_clip_paths = []
@@ -2102,6 +2289,7 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             output_filename="final_reel_v1_for_text.mp4",
         )
 
+        total_duration_seconds = max(1, len(local_clip_paths)) * 5.0
         overlay_texts = parse_on_screen_texts(fields, count=3)
 
         print("Overlay texts:")
@@ -2112,7 +2300,9 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             input_video_path=final_reel_path,
             overlay_texts=overlay_texts,
             output_filename="final_reel_text_v1.mp4",
+            total_duration_seconds=total_duration_seconds,
         )
+
         reel_cover_title = get_reel_cover_title(fields, overlay_texts)
 
         reel_cover_path = create_reel_cover_from_keyframe(
@@ -2135,6 +2325,9 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
         output_lines.append("Reel cover generated:")
         output_lines.append(f"Local file: {reel_cover_path}")
         output_lines.append("")
+        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
+        output_lines.append(f"Approx duration seconds: {total_duration_seconds:.0f}")
+        output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -2143,13 +2336,15 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
+                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Text Overlay Mode completed.
 
 Created final_reel_text_v1.mp4.
-Added 3 on-screen text overlays.
+Added {len(overlay_texts)} on-screen text overlays.
+Final frame count: {len(local_clip_paths)}.
 No voiceover yet.
 No music yet.
 Status moved to Needs Visual Review.
@@ -2185,7 +2380,7 @@ Failed at:
             },
         )
 
-        raise 
+        raise
 def get_reel_cover_title(fields: Dict[str, Any], overlay_texts: List[str]) -> str:
     title = safe_get(fields, "Reel Cover Title", "")
 
@@ -2527,6 +2722,34 @@ def build_ready_for_buffer_summary() -> str:
     lines.append("6. After scheduling, set Visual Status = Sent to Buffer.")
 
     return "\n".join(lines)
+def get_video_duration_seconds(video_path: str) -> float:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print("ffprobe failed:")
+        print(result.stderr)
+        return 0.0
+
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
 def add_ambient_sound_to_reel(
     input_video_path: str,
     output_filename: str = "final_reel_sound_v1.mp4",
@@ -2535,6 +2758,12 @@ def add_ambient_sound_to_reel(
     output_dir.mkdir(exist_ok=True)
 
     output_path = output_dir / output_filename
+
+    duration = get_video_duration_seconds(input_video_path)
+    if not duration:
+        duration = 15.0
+
+    fade_out_start = max(0.0, duration - 1.5)
 
     # Subtle but audible ambient:
     # brown noise + low sine drone, faded in/out.
@@ -2548,12 +2777,12 @@ def add_ambient_sound_to_reel(
         "-f",
         "lavfi",
         "-i",
-        "anoisesrc=color=brown:amplitude=0.18:duration=15",
+        f"anoisesrc=color=brown:amplitude=0.18:duration={duration:.2f}",
 
         "-f",
         "lavfi",
         "-i",
-        "sine=frequency=86:sample_rate=48000:duration=15",
+        f"sine=frequency=86:sample_rate=48000:duration={duration:.2f}",
 
         "-filter_complex",
         (
@@ -2561,7 +2790,7 @@ def add_ambient_sound_to_reel(
             "[2:a]volume=0.035[a2];"
             "[a1][a2]amix=inputs=2:duration=shortest,"
             "afade=t=in:st=0:d=1.2,"
-            "afade=t=out:st=13.5:d=1.5,"
+            f"afade=t=out:st={fade_out_start:.2f}:d=1.5,"
             "alimiter=limit=0.7[aout]"
         ),
 
@@ -2629,7 +2858,6 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             },
         )
 
-        # Recreate final reel with text in the current runner
         clips = extract_reel_motion_clip_urls(existing_links)
 
         local_clip_paths = []
@@ -2651,12 +2879,14 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             output_filename="final_reel_v1_for_sound.mp4",
         )
 
+        total_duration_seconds = max(1, len(local_clip_paths)) * 5.0
         overlay_texts = parse_on_screen_texts(fields, count=3)
 
         final_text_reel_path = add_on_screen_text_to_reel(
             input_video_path=final_reel_path,
             overlay_texts=overlay_texts,
             output_filename="final_reel_text_v1_for_sound.mp4",
+            total_duration_seconds=total_duration_seconds,
         )
 
         final_sound_reel_path = add_ambient_sound_to_reel(
@@ -2689,6 +2919,9 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
         output_lines.append("Sound style:")
         output_lines.append("Subtle ambient room tone + low drone. No voice. No beat.")
         output_lines.append("")
+        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
+        output_lines.append(f"Approx duration seconds: {total_duration_seconds:.0f}")
+        output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -2697,6 +2930,7 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
+                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
@@ -2704,6 +2938,7 @@ Reel Ambient Sound Mode completed.
 
 Created final_reel_sound_v1.mp4.
 Added subtle ambient sound.
+Final frame count: {len(local_clip_paths)}.
 No voiceover.
 No music track.
 Status moved to Needs Visual Review.
@@ -2990,8 +3225,11 @@ def process_record(record: Dict[str, Any]) -> None:
                 process_reel_motion_record(record)
                 return
 
-                process_reel_keyframes_record(record)
-                return
+            process_reel_keyframes_record(record)
+            return
+
+        print(f"Reel record is not actionable. Status: {status_value}")
+        return
 
     try:
         # 1. Brief
