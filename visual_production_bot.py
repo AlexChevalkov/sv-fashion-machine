@@ -968,6 +968,65 @@ def download_reel_image(image_url: str, filename: str) -> str:
     return str(output_path)
 
 
+def clean_krea_direction(text: str) -> str:
+    text = text or ""
+    text = text.strip()
+
+    # Aspect ratio is controlled by API, not prompt text.
+    text = re.sub(r"\b4:5\s*ratio\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b9:16\s*ratio\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bvertical\s*4:5\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bvertical\s*9:16\b", "", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\s+", " ", text).strip(" .,\n\t")
+
+    return text
+
+
+def extract_krea_prompt_sections(prompt_pack: str) -> Dict[str, str]:
+    text = prompt_pack or ""
+
+    labels = [
+        "cover frame",
+        "cover",
+        "scene 1",
+        "scene 2",
+        "scene 3",
+        "final frame",
+        "final",
+    ]
+
+    sections: Dict[str, str] = {}
+
+    pattern = r"(?im)^\s*(cover frame|cover|scene 1|scene 2|scene 3|final frame|final)\s*:\s*"
+    matches = list(re.finditer(pattern, text))
+
+    if not matches:
+        return {"all": clean_krea_direction(text)}
+
+    for idx, match in enumerate(matches):
+        label = match.group(1).lower().strip()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+
+        value = text[start:end].strip()
+        value = clean_krea_direction(value)
+
+        if value:
+            sections[label] = value
+
+    return sections
+
+
+def pick_krea_direction(sections: Dict[str, str], choices: List[str], fallback: str) -> str:
+    for choice in choices:
+        value = sections.get(choice)
+        if value:
+            return value
+
+    return fallback
+
+
 def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
     source_hook = safe_get(fields, "Source Hook")
@@ -975,7 +1034,28 @@ def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     visual_concept = safe_get(fields, "Visual Concept")
     reel_hook = safe_get(fields, "Reel Hook")
     krea_prompt_pack = safe_get(fields, "Krea Prompt Pack")
-    shot_list = safe_get(fields, "Shot List")
+
+    sections = extract_krea_prompt_sections(krea_prompt_pack)
+
+    fallback_direction = clean_krea_direction(krea_prompt_pack)
+
+    start_direction = pick_krea_direction(
+        sections,
+        ["cover frame", "cover", "scene 1"],
+        fallback_direction,
+    )
+
+    middle_direction = pick_krea_direction(
+        sections,
+        ["scene 2", "scene 1", "scene 3"],
+        fallback_direction,
+    )
+
+    final_direction = pick_krea_direction(
+        sections,
+        ["final frame", "final", "scene 3"],
+        fallback_direction,
+    )
 
     shared_rules = f"""
 Create ONE single full-screen vertical photograph.
@@ -1028,12 +1108,6 @@ Visual concept:
 
 Reel hook:
 {reel_hook}
-
-Shot list:
-{shot_list}
-
-Krea style direction:
-{krea_prompt_pack}
 """.strip()
 
     return [
@@ -1043,10 +1117,11 @@ Krea style direction:
 {shared_rules}
 
 START IMAGE:
-Create the opening visual for this specific topic.
+Use ONLY this visual direction for this image:
+{start_direction}
 
-The image must express the main idea of the current record, not a generic luxury object.
-Use one clear symbolic scene or object related to the visual concept.
+Create the opening visual for this specific topic.
+The image must express the main idea of the current record.
 Large empty space.
 Strong editorial restraint.
 A feeling of distance, intelligence and visual control.
@@ -1064,8 +1139,10 @@ No multiple scenes.
 {shared_rules}
 
 MIDDLE IMAGE:
-Create the second visual for this specific topic.
+Use ONLY this visual direction for this image:
+{middle_direction}
 
+Create the second visual for this specific topic.
 Make it closer, more analytical, more tactile or more conceptual than the opening image.
 Use material, framing, light, surface, shadow, color or composition to develop the idea.
 It should feel like the visual argument is becoming sharper.
@@ -1083,8 +1160,10 @@ No multiple scenes.
 {shared_rules}
 
 FINAL IMAGE:
-Create the final visual for this specific topic.
+Use ONLY this visual direction for this image:
+{final_direction}
 
+Create the final visual for this specific topic.
 It should feel like a quiet conclusion.
 More empty space than information.
 A controlled, intelligent, editorial final frame.
@@ -1098,178 +1177,6 @@ No multiple images inside the frame.
 """.strip(),
         },
     ]
-def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
-    record_id = record["id"]
-    fields = record.get("fields", {})
-
-    existing_links = safe_get(fields, "Output Links", "")
-    existing_notes = safe_get(fields, "Render Notes", "")
-
-    print("Reel Keyframes Mode detected.")
-    print("Record ID:", record_id)
-    print("Job Title:", safe_get(fields, "Job Title"))
-
-    try:
-        update_airtable_record(
-            record_id,
-            {
-                "Visual Status": STATUS_RENDERING,
-                "Render Notes": append_note(
-                    existing_notes,
-                    f"Reel Keyframes Mode started at {now_iso()}",
-                ),
-            },
-        )
-
-        prompts = build_reel_keyframe_prompts(fields)
-
-        results = []
-
-        for index, item in enumerate(prompts, start=1):
-            name = item["name"]
-            prompt = item["prompt"]
-
-            print("=" * 80)
-            print(f"Rendering reel keyframe {index}: {name}")
-            print(prompt)
-
-            job_id = create_krea_image_job(
-                prompt=prompt,
-                aspect_ratio="9:16",
-            )
-
-            image_url = poll_krea_job(job_id)
-
-            local_path = download_reel_image(
-                image_url=image_url,
-                filename=f"reel_keyframe_{index:02d}_{name}.png",
-            )
-
-            results.append(
-                {
-                    "index": index,
-                    "name": name,
-                    "image_url": image_url,
-                    "job_id": job_id,
-                    "local_path": local_path,
-                }
-            )
-
-        output_lines = []
-
-        if existing_links.strip():
-            output_lines.append(existing_links.strip())
-            output_lines.append("")
-            output_lines.append("---")
-            output_lines.append("")
-
-        output_lines.append("Reel keyframes generated:")
-
-        for item in results:
-            output_lines.append(
-                f"Keyframe {item['index']} — {item['name']}: {item['image_url']} | job_id: {item['job_id']}"
-            )
-
-        output_lines.append("")
-        output_lines.append("Artifact: visual-production-output")
-        output_lines.append(f"Generated at: {now_iso()}")
-
-        update_airtable_record(
-            record_id,
-            {
-                "Visual Status": STATUS_NEEDS_REVIEW,
-                "Output Links": "\n".join(output_lines).strip(),
-                "Render Notes": append_note(
-                    existing_notes,
-                    f"""
-Reel Keyframes Mode completed.
-
-Generated 3 vertical 9:16 keyframes:
-1. Start frame
-2. Middle frame
-3. Final frame
-
-No video generated yet.
-Status moved to Needs Visual Review.
-
-Generated at:
-{now_iso()}
-""",
-                ),
-            },
-        )
-
-        print("Done. Reel keyframes generated and moved to Needs Visual Review.")
-
-    except Exception as exc:
-        print("Reel Keyframes Mode failed:", repr(exc))
-
-        update_airtable_record(
-            record_id,
-            {
-                "Visual Status": STATUS_ERROR,
-                "Render Notes": append_note(
-                    existing_notes,
-                    f"""
-Reel Keyframes Mode failed.
-
-Error:
-{repr(exc)}
-
-Failed at:
-{now_iso()}
-""",
-                ),
-            },
-        )
-
-        raise
-
-def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
-    text = output_links or ""
-
-    pattern = r"Keyframe\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
-    matches = re.findall(pattern, text, re.IGNORECASE)
-
-    if not matches:
-        raise RuntimeError("Could not find reel keyframe image URLs in Output Links")
-
-    seen = set()
-    results: List[Dict[str, str]] = []
-
-    for index_text, url in matches:
-        index = int(index_text)
-
-        if index in seen:
-            continue
-
-        seen.add(index)
-
-        if index == 1:
-            name = "start"
-        elif index == 2:
-            name = "middle"
-        elif index == 3:
-            name = "final"
-        else:
-            name = f"extra_{index}"
-
-        results.append(
-            {
-                "index": str(index),
-                "name": name,
-                "url": url.strip().rstrip(".,)"),
-            }
-        )
-
-    results.sort(key=lambda item: int(item["index"]))
-
-    if len(results) < 3:
-        raise RuntimeError(
-            f"Expected 3 reel keyframe URLs, found {len(results)}: {results}"
-        )
-
-    return results[:3]
 
 
 def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
