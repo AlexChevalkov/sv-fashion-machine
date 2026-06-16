@@ -2965,8 +2965,8 @@ def process_record(record: Dict[str, Any]) -> None:
                 process_reel_motion_record(record)
                 return
 
-            process_reel_keyframes_record(record)
-            return
+                process_reel_keyframes_record(record)
+                return
 
     try:
         # 1. Brief
