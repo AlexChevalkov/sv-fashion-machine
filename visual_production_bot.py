@@ -2596,8 +2596,8 @@ def add_ambient_sound_to_reel(
 
     output_path = output_dir / output_filename
 
-    # Synthetic subtle ambient:
-    # brown noise + very low sine drone, faded in/out.
+    # Subtle but audible ambient:
+    # brown noise + low sine drone, faded in/out.
     # No voice, no melody, no beat.
     command = [
         "ffmpeg",
@@ -2608,20 +2608,21 @@ def add_ambient_sound_to_reel(
         "-f",
         "lavfi",
         "-i",
-        "anoisesrc=color=brown:amplitude=0.035:duration=15",
+        "anoisesrc=color=brown:amplitude=0.18:duration=15",
 
         "-f",
         "lavfi",
         "-i",
-        "sine=frequency=92:sample_rate=44100:duration=15",
+        "sine=frequency=86:sample_rate=48000:duration=15",
 
         "-filter_complex",
         (
-            "[1:a]lowpass=f=1200,highpass=f=90,volume=0.12[a1];"
-            "[2:a]volume=0.015[a2];"
+            "[1:a]lowpass=f=1100,highpass=f=65,volume=0.42[a1];"
+            "[2:a]volume=0.035[a2];"
             "[a1][a2]amix=inputs=2:duration=shortest,"
             "afade=t=in:st=0:d=1.2,"
-            "afade=t=out:st=13.5:d=1.5[aout]"
+            "afade=t=out:st=13.5:d=1.5,"
+            "alimiter=limit=0.7[aout]"
         ),
 
         "-map",
@@ -2637,7 +2638,7 @@ def add_ambient_sound_to_reel(
         "aac",
 
         "-b:a",
-        "128k",
+        "160k",
 
         "-shortest",
         str(output_path),
