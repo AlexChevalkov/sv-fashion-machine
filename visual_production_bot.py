@@ -3,6 +3,7 @@ import re
 import json
 import math
 import time
+import subprocess
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
@@ -1599,6 +1600,223 @@ Failed at:
         )
 
         raise
+def extract_reel_motion_clip_urls(output_links: str) -> List[Dict[str, str]]:
+    text = output_links or ""
+
+    pattern = r"Motion clip\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError("Could not find reel motion clip URLs in Output Links")
+
+    seen = set()
+    results: List[Dict[str, str]] = []
+
+    for index_text, url in matches:
+        index = int(index_text)
+
+        if index in seen:
+            continue
+
+        seen.add(index)
+
+        if index == 1:
+            name = "start"
+        elif index == 2:
+            name = "middle"
+        elif index == 3:
+            name = "final"
+        else:
+            name = f"extra_{index}"
+
+        results.append(
+            {
+                "index": str(index),
+                "name": name,
+                "url": url.strip().rstrip(".,)"),
+            }
+        )
+
+    results.sort(key=lambda item: int(item["index"]))
+
+    if len(results) < 3:
+        raise RuntimeError(
+            f"Expected 3 reel motion clip URLs, found {len(results)}: {results}"
+        )
+
+    return results[:3]
+
+
+def download_motion_clip(video_url: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    response = requests.get(video_url, timeout=180)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download motion clip: {video_url}")
+
+    output_path = output_dir / filename
+    output_path.write_bytes(response.content)
+
+    print("Downloaded motion clip:", output_path)
+
+    return str(output_path)
+
+
+def assemble_reel_with_ffmpeg(clip_paths: List[str], output_filename: str = "final_reel_v1.mp4") -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    concat_file = output_dir / "concat_list.txt"
+
+    with concat_file.open("w", encoding="utf-8") as f:
+        for path in clip_paths:
+            absolute_path = Path(path).resolve()
+            f.write(f"file '{absolute_path}'\n")
+
+    output_path = output_dir / output_filename
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+
+    print("Running ffmpeg concat:")
+    print(" ".join(command))
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    print("ffmpeg stdout:")
+    print(result.stdout)
+    print("ffmpeg stderr:")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg concat failed with code {result.returncode}")
+
+    print("Final reel assembled:", output_path)
+
+    return str(output_path)
+
+
+def process_reel_assembly_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Assembly Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Assembly Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        clips = extract_reel_motion_clip_urls(existing_links)
+
+        local_clip_paths = []
+
+        for item in clips:
+            index = int(item["index"])
+            name = item["name"]
+            url = item["url"]
+
+            local_path = download_motion_clip(
+                video_url=url,
+                filename=f"source_motion_clip_{index:02d}_{name}.mp4",
+            )
+
+            local_clip_paths.append(local_path)
+
+        final_reel_path = assemble_reel_with_ffmpeg(
+            clip_paths=local_clip_paths,
+            output_filename="final_reel_v1.mp4",
+        )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel assembled:")
+        output_lines.append(f"Local file: {final_reel_path}")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Assembly Mode completed.
+
+Assembled 3 motion clips into final_reel_v1.mp4.
+No text overlay yet.
+No voiceover yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel assembled and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Assembly Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Assembly Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise        
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record["fields"]
@@ -1615,26 +1833,30 @@ def process_record(record: Dict[str, Any]) -> None:
     ).strip().lower()
 
     if "reel" in format_value and "carousel" not in format_value:
-        output_links = safe_get(fields, "Output Links", "")
+    output_links = safe_get(fields, "Output Links", "")
 
-        if status_value == STATUS_QUEUED:
-            process_reel_brief_record(record)
-            return
-
-        if status_value == STATUS_APPROVED:
-            if "Reel motion clips generated" in output_links:
-                print("Reel motion clip already generated. Skipping.")
-                return
-
-            if "Reel keyframes generated" in output_links:
-                process_reel_motion_record(record)
-                return
-
-            process_reel_keyframes_record(record)
-            return
-
-        print(f"Reel record is not actionable. Status: {status_value}")
+    if status_value == STATUS_QUEUED:
+        process_reel_brief_record(record)
         return
+
+    if status_value == STATUS_APPROVED:
+        if "Final reel assembled" in output_links:
+            print("Final reel already assembled. Skipping.")
+            return
+
+        if "Reel motion clips generated" in output_links:
+            process_reel_assembly_record(record)
+            return
+
+        if "Reel keyframes generated" in output_links:
+            process_reel_motion_record(record)
+            return
+
+        process_reel_keyframes_record(record)
+        return
+
+    print(f"Reel record is not actionable. Status: {status_value}")
+    return
 
     try:
         # 1. Brief
