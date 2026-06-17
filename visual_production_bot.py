@@ -2351,9 +2351,9 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
         reel_cover_title = get_reel_cover_title(fields, overlay_texts)
 
         reel_cover_path = create_reel_cover_from_keyframe(
-            output_links=existing_links,
-            title=reel_cover_title,
-            output_filename="reel_cover_v1.png",
+        output_links=existing_links,
+        title=reel_cover_title,
+        output_filename="reel_cover_v1.png",
         )
 
         output_lines = []
