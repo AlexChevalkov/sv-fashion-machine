@@ -1598,10 +1598,10 @@ def process_reel_motion_record(record: Dict[str, Any]) -> None:
         )
 
         keyframes = extract_reel_keyframe_urls(existing_links)
-                selected_frame_order_text = safe_get(fields, "Selected Frame Order", "")
+        selected_frame_order_text = safe_get(fields, "Selected Frame Order", "")
         keyframes = apply_selected_frame_order(
-            keyframes,
-            selected_frame_order_text,
+        keyframes,
+        selected_frame_order_text,
         )
 
         base_prompt = build_reel_motion_prompt(fields)
