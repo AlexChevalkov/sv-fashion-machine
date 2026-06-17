@@ -3042,56 +3042,61 @@ def add_ambient_sound_to_reel(
 
     output_path = output_dir / output_filename
 
-    # Subtle but audible ambient:
-    # brown noise + low sine drone, faded in/out.
-    # No voice, no melody, no beat.
+    video_duration = get_video_duration_seconds(input_video_path)
+
+    if video_duration <= 0:
+        video_duration = 60.0
+
+    # Make audio slightly longer than video so ffmpeg never cuts the video.
+    audio_duration = video_duration + 1.0
+
     command = [
         "ffmpeg",
         "-y",
         "-i",
-        input_video_path,
+        str(input_video_path),
 
         "-f",
         "lavfi",
         "-i",
-        "anoisesrc=color=brown:amplitude=0.18:duration=15",
+        f"anoisesrc=color=brown:amplitude=0.28:duration={audio_duration:.2f}",
 
         "-f",
         "lavfi",
         "-i",
-        "sine=frequency=86:sample_rate=48000:duration=15",
+        f"sine=frequency=82:sample_rate=48000:duration={audio_duration:.2f}",
 
         "-filter_complex",
         (
-            "[1:a]lowpass=f=1100,highpass=f=65,volume=0.42[a1];"
-            "[2:a]volume=0.035[a2];"
-            "[a1][a2]amix=inputs=2:duration=shortest,"
-            "afade=t=in:st=0:d=1.2,"
-            "afade=t=out:st=13.5:d=1.5,"
-            "alimiter=limit=0.7[aout]"
+            "[1:a]lowpass=f=1400,highpass=f=55,volume=0.75[a1];"
+            "[2:a]volume=0.07[a2];"
+            "[a1][a2]amix=inputs=2:duration=longest,"
+            "afade=t=in:st=0:d=1.0,"
+            "alimiter=limit=0.85[aout]"
         ),
 
         "-map",
         "0:v:0",
-
         "-map",
         "[aout]",
 
         "-c:v",
         "copy",
-
         "-c:a",
         "aac",
-
         "-b:a",
-        "160k",
+        "192k",
 
-        "-shortest",
+        "-t",
+        f"{video_duration:.2f}",
+
         str(output_path),
     ]
 
     print("Running ffmpeg ambient sound:")
     print(" ".join(command))
+    print("Input video duration:", video_duration)
+    print("Generated audio duration:", audio_duration)
 
     result = subprocess.run(
         command,
