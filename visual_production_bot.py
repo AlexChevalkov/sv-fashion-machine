@@ -28,7 +28,6 @@ ANTHROPIC_MODEL = (os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-6").str
 
 AIRTABLE_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Visual Jobs")
 AIRTABLE_VIEW_NAME = os.environ.get("AIRTABLE_VIEW_NAME", "Queued Visual Jobs")
-AIRTABLE_CONTENT_TABLE_NAME = os.environ.get("AIRTABLE_CONTENT_TABLE_NAME", "Content Inbox")
 
 BRAND_NAME = os.environ.get("BRAND_NAME", "SV FASHION MEDIA")
 INSTAGRAM_HANDLE = os.environ.get("INSTAGRAM_HANDLE", "@sv_fashionacademy")
@@ -801,12 +800,6 @@ def generate_reel_brief(record: Dict[str, Any]) -> Dict[str, Any]:
 
 Тон:
 сухо, умно, точно, премиально.
-
-Критически важно:
-Krea Prompt Pack НЕ должен быть только общим style rules.
-Он обязан содержать отдельные scene-specific prompts с метками:
-cover frame:, scene 1:, scene 2:, scene 3:, scene 4:, final frame:
-Каждая сцена должна описывать конкретный визуальный объект / поверхность / ситуацию.
 """
 
     user_prompt = f"""
@@ -830,17 +823,9 @@ cover frame:, scene 1:, scene 2:, scene 3:, scene 4:, final frame:
   "reel_script": "voiceover script на русском, 90-130 слов, короткие фразы",
   "shot_list": "5-7 сцен с таймингом: 0-3 sec, 3-7 sec и т.д.",
   "on_screen_text": "короткие фразы для экрана, по одной на сцену",
-  "krea_prompt_pack": "cover frame: ...\n\nscene 1: ...\n\nscene 2: ...\n\nscene 3: ...\n\nscene 4: ...\n\nfinal frame: ...",
+  "krea_prompt_pack": "prompts на английском для keyframes / motion: cover frame, scene 1, scene 2, scene 3, final frame. Без текста внутри изображения.",
   "render_notes": "короткие notes: как собирать рилс, темп, музыка, движение камеры"
 }}
-
-Жёсткие правила для krea_prompt_pack:
-- Пиши на английском.
-- Обязательно используй ровно эти метки: cover frame, scene 1, scene 2, scene 3, scene 4, final frame.
-- Не возвращай один общий блок Style rules вместо сцен.
-- В каждой сцене должен быть конкретный визуальный subject: object, garment, fabric, surface, material, still life, architecture, color field, etc.
-- В каждой сцене: no people, no text, no logos, no letters.
-- Каждый prompt должен быть пригоден для одной вертикальной 9:16 фотографии.
 
 Правила:
 - Reel должен быть не пересказом поста, а усилением идеи.
@@ -854,7 +839,7 @@ cover frame:, scene 1:, scene 2:, scene 3:, scene 4:, final frame:
 
     message = client.messages.create(
         model=ANTHROPIC_MODEL,
-        max_tokens=2600,
+        max_tokens=2200,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -888,22 +873,6 @@ cover frame:, scene 1:, scene 2:, scene 3:, scene 4:, final frame:
     brief["chosen_format"] = "Reel"
     brief["visual_mode"] = brief.get("visual_mode") or "Hybrid"
     brief["reel_duration"] = brief.get("reel_duration") or "30 sec"
-
-    # Safety: if Claude ignored the scene-specific format, repair it now before saving.
-    if not krea_prompt_pack_has_scene_labels(str(brief.get("krea_prompt_pack", ""))):
-        print("Claude returned generic Krea Prompt Pack. Repairing into scene-specific prompts...")
-        repaired_directions = generate_scene_directions_with_claude_from_fields(
-            {
-                **fields,
-                "Job Title": brief.get("job_title", safe_get(fields, "Job Title")),
-                "Visual Hook": brief.get("visual_hook", ""),
-                "Visual Concept": brief.get("visual_concept", ""),
-                "Reel Hook": brief.get("reel_hook", ""),
-                "Shot List": brief.get("shot_list", ""),
-                "Krea Prompt Pack": brief.get("krea_prompt_pack", ""),
-            }
-        )
-        brief["krea_prompt_pack"] = directions_to_krea_prompt_pack(repaired_directions)
 
     return brief
 
@@ -998,317 +967,11 @@ def download_reel_image(image_url: str, filename: str) -> str:
     return str(output_path)
 
 
-def clean_krea_direction(text: str) -> str:
-    text = text or ""
-    text = text.strip()
-
-    # Aspect ratio is controlled by API, not prompt text.
-    text = re.sub(r"\b4:5\s*ratio\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b9:16\s*ratio\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bvertical\s*4:5\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bvertical\s*9:16\b", "", text, flags=re.IGNORECASE)
-
-    text = re.sub(r"\s+", " ", text).strip(" .,\n\t")
-
-    return text
-
-
-def extract_krea_prompt_sections(prompt_pack: str) -> Dict[str, str]:
-    text = prompt_pack or ""
-
-    pattern = (
-        r"(?im)^\s*"
-        r"(cover frame|cover|scene 1|scene 2|scene 3|scene 4|scene 5|scene 6|final frame|final)"
-        r"\s*:\s*"
-    )
-
-    matches = list(re.finditer(pattern, text))
-
-    if not matches:
-        return {"all": clean_krea_direction(text)}
-
-    sections: Dict[str, str] = {}
-
-    for idx, match in enumerate(matches):
-        label = match.group(1).lower().strip()
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-
-        value = clean_krea_direction(text[start:end])
-
-        if value:
-            sections[label] = value
-
-    return sections
-
-
-def krea_prompt_pack_has_scene_labels(prompt_pack: str) -> bool:
-    sections = extract_krea_prompt_sections(prompt_pack)
-    labelled = [key for key in sections.keys() if key != "all"]
-    return len(labelled) >= 3
-
-
-def directions_to_krea_prompt_pack(directions: List[Dict[str, str]]) -> str:
-    labels = ["cover frame", "scene 1", "scene 2", "scene 3", "scene 4", "final frame"]
-    lines: List[str] = []
-
-    for idx, item in enumerate(directions[:6]):
-        label = labels[idx] if idx < len(labels) else f"scene {idx}"
-        direction = clean_krea_direction(item.get("direction", ""))
-        lines.append(f"{label}: {direction}")
-        lines.append("")
-
-    return "\n".join(lines).strip()
-
-
-def normalize_direction_for_compare(text: str) -> str:
-    text = clean_krea_direction(text).lower()
-    text = re.sub(r"[^a-zа-я0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def validate_scene_directions(directions: List[Dict[str, str]]) -> None:
-    if len(directions) < 5:
-        raise RuntimeError(f"Expected at least 5 scene-specific keyframe directions, got {len(directions)}")
-
-    normalized = [normalize_direction_for_compare(item.get("direction", "")) for item in directions]
-    unique = {item for item in normalized if item}
-
-    if len(unique) < min(5, len(directions)):
-        raise RuntimeError(
-            "Keyframe directions are not scene-specific enough: too many repeated prompts. "
-            "Stopping before Krea render to avoid wasting credits."
-        )
-
-    for idx, item in enumerate(directions, start=1):
-        direction = clean_krea_direction(item.get("direction", ""))
-        lowered = direction.lower()
-
-        if len(direction) < 80:
-            raise RuntimeError(f"Keyframe {idx} direction is too short: {direction}")
-
-        if lowered.startswith("style rules") or lowered.startswith("negative prompts"):
-            raise RuntimeError(
-                f"Keyframe {idx} is only a generic style block, not a scene prompt. "
-                "Stopping before Krea render."
-            )
-
-
-def generate_scene_directions_with_claude_from_fields(fields: Dict[str, Any]) -> List[Dict[str, str]]:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
+def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
-    source_hook = safe_get(fields, "Source Hook")
     visual_hook = safe_get(fields, "Visual Hook")
     visual_concept = safe_get(fields, "Visual Concept")
     reel_hook = safe_get(fields, "Reel Hook")
-    shot_list = safe_get(fields, "Shot List")
-    style_rules = safe_get(fields, "Krea Prompt Pack")
-
-    system_prompt = """
-You are a senior visual editor for a premium fashion-media Instagram Reel.
-Convert the current reel concept into six concrete Krea image prompts.
-
-Do not return general style rules only.
-Each direction must describe one specific vertical photograph: a concrete object, fabric, surface, garment, still life, color field, architecture, or material situation.
-No text inside images. No people unless absolutely necessary. No logos. No letters.
-Return valid JSON only.
-""".strip()
-
-    user_prompt = f"""
-Current topic:
-{title}
-
-Source hook:
-{source_hook}
-
-Visual hook:
-{visual_hook}
-
-Visual concept:
-{visual_concept}
-
-Reel hook:
-{reel_hook}
-
-Shot list:
-{shot_list}
-
-Existing style rules / color palette:
-{style_rules}
-
-Create six scene-specific Krea image directions in this order:
-1. frame_01_start — opening color/surface or strongest abstract visual hook.
-2. frame_02_color_code — graphic color/textile/ornament or second visual argument.
-3. frame_03_object_code — symbolic object still life connected to the personality/code of the topic.
-4. frame_04_extra — secondary garment/material/archive detail; may be excluded later.
-5. frame_05_material_fragment — close-up material fragment, fold, surface, or texture memory.
-6. frame_06_final — quiet final abstract/color/surface frame, visually related to frame 1 but different.
-
-Return exactly this JSON schema:
-{{
-  "directions": [
-    {{"name": "frame_01_start", "direction": "English Krea prompt, one concrete scene"}},
-    {{"name": "frame_02_color_code", "direction": "English Krea prompt, one concrete scene"}},
-    {{"name": "frame_03_object_code", "direction": "English Krea prompt, one concrete scene"}},
-    {{"name": "frame_04_extra", "direction": "English Krea prompt, one concrete scene"}},
-    {{"name": "frame_05_material_fragment", "direction": "English Krea prompt, one concrete scene"}},
-    {{"name": "frame_06_final", "direction": "English Krea prompt, one concrete scene"}}
-  ]
-}}
-
-Important:
-- Each direction must be different.
-- Do not start directions with "Style rules".
-- Do not include multiple scenes in one direction.
-- Do not mention storyboard, collage, grid, panels, sequence, or contact sheet.
-""".strip()
-
-    message = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2600,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    response_text = message.content[0].text
-    print("Claude scene directions raw response:")
-    print(response_text)
-
-    data = extract_json(response_text)
-    directions = data.get("directions")
-
-    if not isinstance(directions, list):
-        raise RuntimeError(f"Claude scene directions missing list: {data}")
-
-    cleaned: List[Dict[str, str]] = []
-
-    for idx, item in enumerate(directions[:6], start=1):
-        if not isinstance(item, dict):
-            continue
-
-        name = clean_krea_direction(str(item.get("name") or f"frame_{idx:02d}"))
-        direction = clean_krea_direction(str(item.get("direction") or ""))
-
-        if direction:
-            cleaned.append(
-                {
-                    "name": name or f"frame_{idx:02d}",
-                    "direction": direction,
-                }
-            )
-
-    validate_scene_directions(cleaned)
-
-    return cleaned[:6]
-
-
-def build_six_krea_directions(fields: Dict[str, Any]) -> List[Dict[str, str]]:
-    prompt_pack = safe_get(fields, "Krea Prompt Pack")
-    sections = extract_krea_prompt_sections(prompt_pack)
-
-    labelled_sections = [key for key in sections.keys() if key != "all"]
-
-    if len(labelled_sections) < 3:
-        print("Krea Prompt Pack has no usable scene labels. Generating scene-specific directions with Claude before Krea render.")
-        directions = generate_scene_directions_with_claude_from_fields(fields)
-        validate_scene_directions(directions)
-        return directions
-
-    preferred_order = [
-        ("frame_01_start", ["cover frame", "cover", "scene 1"]),
-        ("frame_02_color_code", ["scene 1", "scene 2"]),
-        ("frame_03_object_code", ["scene 2", "scene 3"]),
-        ("frame_04_extra", ["scene 3", "scene 4"]),
-        ("frame_05_material_fragment", ["scene 4", "scene 5", "scene 3"]),
-        ("frame_06_final", ["final frame", "final", "scene 6", "scene 5"]),
-    ]
-
-    ordered_section_values = [sections[key] for key in sections.keys() if key != "all"]
-    used_values: List[str] = []
-    results: List[Dict[str, str]] = []
-
-    for name, labels in preferred_order:
-        direction = ""
-
-        for label in labels:
-            value = sections.get(label)
-            if value and value not in used_values:
-                direction = value
-                break
-
-        if not direction:
-            for value in ordered_section_values:
-                if value not in used_values:
-                    direction = value
-                    break
-
-        if direction:
-            used_values.append(direction)
-            results.append({"name": name, "direction": direction})
-
-    if len(results) < 5:
-        print("Scene labels exist but are insufficient. Repairing with Claude scene directions.")
-        results = generate_scene_directions_with_claude_from_fields(fields)
-
-    validate_scene_directions(results)
-
-    return results[:6]
-
-
-def format_generated_keyframe_prompts(prompts: List[Dict[str, str]]) -> str:
-    lines = []
-
-    for idx, item in enumerate(prompts, start=1):
-        lines.append(f"KEYFRAME {idx} — {item['name']}")
-        lines.append("")
-        lines.append(item["prompt"])
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    return "\n".join(lines).strip()
-
-
-def parse_selected_frame_order_text(text: str, max_frame: int) -> List[int]:
-    text = text or ""
-    numbers = re.findall(r"\d+", text)
-
-    result: List[int] = []
-    seen = set()
-
-    for number_text in numbers:
-        number = int(number_text)
-
-        if number < 1 or number > max_frame:
-            continue
-
-        if number in seen:
-            continue
-
-        seen.add(number)
-        result.append(number)
-
-    if not result:
-        return list(range(1, max_frame + 1))
-
-    return result
-
-
-def get_selected_frame_order(fields: Dict[str, Any], max_frame: int) -> List[int]:
-    selected_text = safe_get(fields, "Selected Frame Order", "")
-    return parse_selected_frame_order_text(selected_text, max_frame=max_frame)
-
-
-def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> List[Dict[str, str]]:
-    title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
-    source_hook = safe_get(fields, "Source Hook")
-    visual_hook = safe_get(fields, "Visual Hook")
-    visual_concept = safe_get(fields, "Visual Concept")
-    reel_hook = safe_get(fields, "Reel Hook")
-
-    directions = build_six_krea_directions(fields)
-    validate_scene_directions(directions)
 
     shared_rules = f"""
 Create ONE single full-screen vertical photograph.
@@ -1323,7 +986,7 @@ This is not a set of images.
 The entire 9:16 canvas must be one continuous photographic image from top to bottom.
 One camera angle only.
 One composition only.
-One visual subject or one visual situation only.
+One visual subject only.
 No horizontal strips.
 No panels.
 No grid.
@@ -1331,68 +994,101 @@ No split screen.
 No multiple moments.
 No multiple scenes inside the same image.
 
-Editorial fashion-media visual.
+Editorial fashion still life.
 Quiet luxury.
-Visual intelligence.
-Negative space.
-Controlled composition.
-Cold or restrained light.
+Cold diffused light.
 Matte textures.
+Stone, plaster, linen, paper, leather.
+Large negative space.
+Premium magazine image.
 No text inside the image.
 No letters.
 No logos.
-No fake brand names.
-No people unless the concept absolutely requires it.
-No hands unless the concept absolutely requires it.
+No people.
+No hands.
+No model.
 No product catalogue feeling.
 No advertising layout.
 
-Current topic:
-{title}
-
-Source hook:
-{source_hook}
-
-Visual hook:
-{visual_hook}
-
-Visual concept:
-{visual_concept}
-
-Reel hook:
-{reel_hook}
+Topic: {title}
+Visual idea: {visual_hook}
+Concept: {visual_concept}
+Opening thought: {reel_hook}
 """.strip()
 
-    prompts: List[Dict[str, str]] = []
-
-    for idx, item in enumerate(directions, start=1):
-        name = item["name"]
-        direction = item["direction"]
-
-        prompt = f"""
+    return [
+        {
+            "name": "start",
+            "prompt": f"""
 {shared_rules}
 
-KEYFRAME {idx}:
-Use ONLY this visual direction for this image:
-{direction}
+Make a single vertical editorial photograph of one small beige leather handbag placed far away in a large empty studio space.
 
-Create one specific image for this current topic.
-Do not combine it with other scenes.
-Do not add other directions.
-Do not create variations inside the same image.
-The image must be clear, editorial, restrained and usable as one reel segment.
-
-One continuous vertical photograph.
-No collage.
+The handbag is centered horizontally, low in the frame.
+Most of the image is empty cold grey space.
+Soft background gradient.
+No other objects.
+No fabric.
+No glove.
+No detail shots.
+No second image.
 No panels.
-No sequence.
-No multiple scenes.
-""".strip()
+No collage.
 
-        prompts.append({"name": name, "prompt": prompt})
+The feeling: distance, silence, desire, control.
+The image must look like one premium fashion magazine still life.
+""".strip(),
+        },
+        {
+            "name": "middle",
+            "prompt": f"""
+{shared_rules}
 
-    return prompts
+Make a single vertical editorial photograph of one close-up detail of the same beige leather handbag.
 
+Only one continuous macro composition:
+a leather edge, a clasp, stitching, or a metal ring.
+The detail occupies the lower third of the image.
+The upper two thirds are clean empty negative space.
+Cold light.
+Sharp leather texture.
+Deep controlled shadow.
+
+No other objects.
+No fabric.
+No glove.
+No multiple details.
+No panels.
+No collage.
+No storyboard.
+No horizontal strips.
+""".strip(),
+        },
+        {
+            "name": "final",
+            "prompt": f"""
+{shared_rules}
+
+Make a single vertical editorial photograph of one beige leather handbag placed almost at the edge of a pale stone surface.
+
+The bag is partly visible, not centered.
+Most of the image is empty stone surface and cold light.
+Very restrained.
+Very quiet.
+Editorial final frame feeling.
+
+One object only.
+One continuous photograph.
+No fabric.
+No glove.
+No multiple shots.
+No panels.
+No collage.
+No storyboard.
+No horizontal strips.
+""".strip(),
+        },
+    ]
 
 def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
@@ -1418,17 +1114,6 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
         )
 
         prompts = build_reel_keyframe_prompts(fields)
-        prompt_log = format_generated_keyframe_prompts(prompts)
-        selected_order = get_selected_frame_order(fields, max_frame=len(prompts))
-
-        update_airtable_record(
-            record_id,
-            {
-                "Generated Keyframe Prompts": prompt_log,
-                "Generated Keyframe Count": len(prompts),
-                "Final Frame Count": len(selected_order),
-            },
-        )
 
         results = []
 
@@ -1478,10 +1163,6 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
             )
 
         output_lines.append("")
-        output_lines.append(f"Generated keyframe count: {len(results)}")
-        output_lines.append(f"Selected frame order: {','.join(str(x) for x in selected_order)}")
-        output_lines.append(f"Final frame count: {len(selected_order)}")
-        output_lines.append("")
         output_lines.append("Artifact: visual-production-output")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -1490,18 +1171,17 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
-                "Generated Keyframe Prompts": prompt_log,
-                "Generated Keyframe Count": len(results),
-                "Final Frame Count": len(selected_order),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Keyframes Mode completed.
 
-Generated {len(results)} vertical 9:16 keyframes.
-Selected frame order for motion/reel:
-{','.join(str(x) for x in selected_order)}
+Generated 3 vertical 9:16 keyframes:
+1. Start frame
+2. Middle frame
+3. Final frame
 
+No video generated yet.
 Status moved to Needs Visual Review.
 
 Generated at:
@@ -1537,34 +1217,82 @@ Failed at:
 
         raise
 
+def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
+    text = output_links or ""
+
+    pattern = r"Keyframe\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError("Could not find reel keyframe image URLs in Output Links")
+
+    seen = set()
+    results: List[Dict[str, str]] = []
+
+    for index_text, url in matches:
+        index = int(index_text)
+
+        if index in seen:
+            continue
+
+        seen.add(index)
+
+        if index == 1:
+            name = "start"
+        elif index == 2:
+            name = "middle"
+        elif index == 3:
+            name = "final"
+        else:
+            name = f"extra_{index}"
+
+        results.append(
+            {
+                "index": str(index),
+                "name": name,
+                "url": url.strip().rstrip(".,)"),
+            }
+        )
+
+    results.sort(key=lambda item: int(item["index"]))
+
+    if len(results) < 3:
+        raise RuntimeError(
+            f"Expected 3 reel keyframe URLs, found {len(results)}: {results}"
+        )
+
+    return results[:3]
+
+
 def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
     reel_hook = safe_get(fields, "Reel Hook")
     visual_concept = safe_get(fields, "Visual Concept")
 
     return f"""
-Create a 5 second vertical fashion-editorial video from the provided start image.
+Create a 5 second vertical fashion editorial video from the provided start image.
 
 ABSOLUTE RULE:
 The provided image is the locked visual reference.
 Do not redesign it.
 Do not reinterpret it.
-Do not change the main subject.
+Do not change the object.
 Do not change the composition.
-Do not change the material logic.
-Do not change the shape language.
+Do not change the material.
+Do not change the shape.
 Do not add new objects.
 
 The video must preserve:
-- the exact visual subject / still-life identity
-- the same silhouette or geometric structure
-- the same material texture
+- the exact handbag / object identity
+- the same silhouette
+- the same leather texture
+- the same stitching
+- the same metal hardware
 - the same color palette
 - the same background
 - the same negative space
 - the same lighting mood
-- the same editorial atmosphere
-- the same visual concept
+- the same editorial still-life atmosphere
 
 Allowed movement only:
 - extremely slow camera push-in
@@ -1578,10 +1306,10 @@ Forbidden:
 - no morphing
 - no transformation
 - no object deformation
-- no new fabric unless it already exists in the source image
-- no extra folds unless they already exist in the source image
+- no new fabric
+- no extra folds
 - no additional accessories
-- no new subject
+- no new handbag parts
 - no people
 - no hands
 - no model
@@ -1599,7 +1327,7 @@ Forbidden:
 - no fantasy effect
 
 The video should feel like:
-a moving fashion-media still life,
+a moving fashion magazine still life,
 quiet luxury,
 editorial intelligence,
 distance,
@@ -1617,7 +1345,7 @@ Reel hook:
 
 Final direction:
 Make the image feel alive only through camera and atmosphere.
-The visual subject itself must remain stable and unchanged.
+The object itself must remain stable and unchanged.
 """.strip()
 
 
@@ -1734,38 +1462,6 @@ def download_reel_video(video_url: str, filename: str) -> str:
     return str(output_path)
 
 
-def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
-    text = output_links or ""
-
-    pattern = r"Keyframe\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
-    matches = re.findall(pattern, text, re.IGNORECASE)
-
-    if not matches:
-        raise RuntimeError("Could not find reel keyframe image URLs in Output Links")
-
-    seen = set()
-    results: List[Dict[str, str]] = []
-
-    for index_text, url in matches:
-        index = int(index_text)
-
-        if index in seen:
-            continue
-
-        seen.add(index)
-
-        results.append(
-            {
-                "index": str(index),
-                "name": f"keyframe_{index:02d}",
-                "url": url.strip().rstrip(".,)"),
-            }
-        )
-
-    results.sort(key=lambda item: int(item["index"]))
-
-    return results
-
 def process_reel_motion_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record.get("fields", {})
@@ -1789,46 +1485,28 @@ def process_reel_motion_record(record: Dict[str, Any]) -> None:
             },
         )
 
-        all_keyframes = extract_reel_keyframe_urls(existing_links)
-        selected_order = get_selected_frame_order(fields, max_frame=len(all_keyframes))
-
-        keyframe_by_index = {
-            int(item["index"]): item
-            for item in all_keyframes
-        }
-
-        selected_keyframes = [
-            keyframe_by_index[index]
-            for index in selected_order
-            if index in keyframe_by_index
-        ]
-
-        if not selected_keyframes:
-            raise RuntimeError(
-                f"No selected keyframes found. selected_order={selected_order}, available={all_keyframes}"
-            )
+        keyframes = extract_reel_keyframe_urls(existing_links)
 
         base_prompt = build_reel_motion_prompt(fields)
 
         results = []
 
-        for sequence_index, item in enumerate(selected_keyframes, start=1):
-            original_index = item["index"]
+        for item in keyframes:
+            index = item["index"]
             name = item["name"]
             start_image_url = item["url"]
 
             prompt = f"""
 {base_prompt}
 
-This motion clip is based on selected reel frame {sequence_index}.
-Original keyframe number: {original_index}.
+This motion clip is based on keyframe {index}: {name}.
 Create only this one short segment.
 Preserve this exact source image.
 Do not introduce visual elements from other keyframes.
 """.strip()
 
             print("=" * 80)
-            print(f"Rendering reel motion clip {sequence_index}: original keyframe {original_index}")
+            print(f"Rendering reel motion clip {index}: {name}")
             print("Using start image URL:", start_image_url)
             print("Motion prompt:")
             print(prompt)
@@ -1843,13 +1521,12 @@ Do not introduce visual elements from other keyframes.
 
             local_path = download_reel_video(
                 video_url=video_url,
-                filename=f"reel_motion_clip_{sequence_index:02d}_from_keyframe_{original_index}.mp4",
+                filename=f"reel_motion_clip_{int(index):02d}_{name}.mp4",
             )
 
             results.append(
                 {
-                    "sequence_index": sequence_index,
-                    "original_keyframe_index": original_index,
+                    "index": index,
                     "name": name,
                     "video_url": video_url,
                     "job_id": job_id,
@@ -1869,13 +1546,10 @@ Do not introduce visual elements from other keyframes.
 
         for item in results:
             output_lines.append(
-                f"Motion clip {item['sequence_index']} — from keyframe {item['original_keyframe_index']}: {item['video_url']} | job_id: {item['job_id']}"
+                f"Motion clip {item['index']} — {item['name']}: {item['video_url']} | job_id: {item['job_id']}"
             )
             output_lines.append(f"Local file: {item['local_path']}")
 
-        output_lines.append("")
-        output_lines.append(f"Selected frame order: {','.join(str(x) for x in selected_order)}")
-        output_lines.append(f"Final frame count: {len(results)}")
         output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
@@ -1885,16 +1559,17 @@ Do not introduce visual elements from other keyframes.
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
-                "Final Frame Count": len(results),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Motion Mode completed.
 
-Generated {len(results)} vertical 5 sec motion clips.
-Selected frame order:
-{','.join(str(x) for x in selected_order)}
+Generated 3 vertical 5 sec motion clips:
+1. Start
+2. Middle
+3. Final
 
+No final reel assembly yet.
 Status moved to Needs Visual Review.
 
 Generated at:
@@ -1904,7 +1579,7 @@ Generated at:
             },
         )
 
-        print(f"Done. {len(results)} reel motion clips generated and moved to Needs Visual Review.")
+        print("Done. 3 reel motion clips generated and moved to Needs Visual Review.")
 
     except Exception as exc:
         print("Reel Motion Mode failed:", repr(exc))
@@ -1949,17 +1624,31 @@ def extract_reel_motion_clip_urls(output_links: str) -> List[Dict[str, str]]:
 
         seen.add(index)
 
+        if index == 1:
+            name = "start"
+        elif index == 2:
+            name = "middle"
+        elif index == 3:
+            name = "final"
+        else:
+            name = f"extra_{index}"
+
         results.append(
             {
                 "index": str(index),
-                "name": f"motion_clip_{index:02d}",
+                "name": name,
                 "url": url.strip().rstrip(".,)"),
             }
         )
 
     results.sort(key=lambda item: int(item["index"]))
 
-    return results
+    if len(results) < 3:
+        raise RuntimeError(
+            f"Expected 3 reel motion clip URLs, found {len(results)}: {results}"
+        )
+
+    return results[:3]
 
 
 def download_motion_clip(video_url: str, filename: str) -> str:
@@ -2082,8 +1771,6 @@ def process_reel_assembly_record(record: Dict[str, Any]) -> None:
 
         output_lines.append("Final reel assembled:")
         output_lines.append(f"Local file: {final_reel_path}")
-        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
-        output_lines.append(f"Approx duration seconds: {len(local_clip_paths) * 5}")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -2092,13 +1779,12 @@ def process_reel_assembly_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
-                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Assembly Mode completed.
 
-Assembled {len(local_clip_paths)} motion clips into final_reel_v1.mp4.
+Assembled 3 motion clips into final_reel_v1.mp4.
 No text overlay yet.
 No voiceover yet.
 Status moved to Needs Visual Review.
@@ -2134,7 +1820,7 @@ Failed at:
             },
         )
 
-        raise
+        raise   
 def clean_overlay_line(line: str) -> str:
     line = line or ""
     line = line.strip()
@@ -2344,7 +2030,6 @@ def add_on_screen_text_to_reel(
     input_video_path: str,
     overlay_texts: List[str],
     output_filename: str = "final_reel_text_v1.mp4",
-    total_duration_seconds: float | None = None,
 ) -> str:
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
@@ -2361,26 +2046,23 @@ def add_on_screen_text_to_reel(
             )
         )
 
-    if not total_duration_seconds:
-        total_duration_seconds = get_video_duration_seconds(input_video_path)
-
-    if not total_duration_seconds:
-        total_duration_seconds = 15.0
-
-    text_count = max(1, len(text_files))
-    segment_duration = total_duration_seconds / text_count
+    # 15 sec reel = 3 clips x 5 sec
+    time_ranges = [
+        (0, 5),
+        (5, 10),
+        (10, 15),
+    ]
 
     draw_filters = []
 
     for idx, text_file in enumerate(text_files):
-        start = idx * segment_duration
-        end = total_duration_seconds if idx == text_count - 1 else (idx + 1) * segment_duration
+        start, end = time_ranges[idx]
 
         draw_filters.append(
             "drawtext="
             f"fontfile='{FONT_BOLD}':"
             f"textfile='{text_file}':"
-            f"enable='between(t,{start:.2f},{end:.2f})':"
+            f"enable='between(t,{start},{end})':"
             "x=80:"
             "y=h*0.68:"
             "fontsize=58:"
@@ -2458,6 +2140,7 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             },
         )
 
+        # Re-download the 3 motion clips and assemble again in this runner
         clips = extract_reel_motion_clip_urls(existing_links)
 
         local_clip_paths = []
@@ -2479,7 +2162,6 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             output_filename="final_reel_v1_for_text.mp4",
         )
 
-        total_duration_seconds = max(1, len(local_clip_paths)) * 5.0
         overlay_texts = parse_on_screen_texts(fields, count=3)
 
         print("Overlay texts:")
@@ -2490,9 +2172,7 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             input_video_path=final_reel_path,
             overlay_texts=overlay_texts,
             output_filename="final_reel_text_v1.mp4",
-            total_duration_seconds=total_duration_seconds,
         )
-
         reel_cover_title = get_reel_cover_title(fields, overlay_texts)
 
         reel_cover_path = create_reel_cover_from_keyframe(
@@ -2515,9 +2195,6 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
         output_lines.append("Reel cover generated:")
         output_lines.append(f"Local file: {reel_cover_path}")
         output_lines.append("")
-        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
-        output_lines.append(f"Approx duration seconds: {total_duration_seconds:.0f}")
-        output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -2526,15 +2203,13 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
-                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
 Reel Text Overlay Mode completed.
 
 Created final_reel_text_v1.mp4.
-Added {len(overlay_texts)} on-screen text overlays.
-Final frame count: {len(local_clip_paths)}.
+Added 3 on-screen text overlays.
 No voiceover yet.
 No music yet.
 Status moved to Needs Visual Review.
@@ -2570,7 +2245,7 @@ Failed at:
             },
         )
 
-        raise
+        raise 
 def get_reel_cover_title(fields: Dict[str, Any], overlay_texts: List[str]) -> str:
     title = safe_get(fields, "Reel Cover Title", "")
 
@@ -2912,34 +2587,6 @@ def build_ready_for_buffer_summary() -> str:
     lines.append("6. After scheduling, set Visual Status = Sent to Buffer.")
 
     return "\n".join(lines)
-def get_video_duration_seconds(video_path: str) -> float:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print("ffprobe failed:")
-        print(result.stderr)
-        return 0.0
-
-    try:
-        return float(result.stdout.strip())
-    except Exception:
-        return 0.0
-
 def add_ambient_sound_to_reel(
     input_video_path: str,
     output_filename: str = "final_reel_sound_v1.mp4",
@@ -2948,12 +2595,6 @@ def add_ambient_sound_to_reel(
     output_dir.mkdir(exist_ok=True)
 
     output_path = output_dir / output_filename
-
-    duration = get_video_duration_seconds(input_video_path)
-    if not duration:
-        duration = 15.0
-
-    fade_out_start = max(0.0, duration - 1.5)
 
     # Subtle but audible ambient:
     # brown noise + low sine drone, faded in/out.
@@ -2967,12 +2608,12 @@ def add_ambient_sound_to_reel(
         "-f",
         "lavfi",
         "-i",
-        f"anoisesrc=color=brown:amplitude=0.18:duration={duration:.2f}",
+        "anoisesrc=color=brown:amplitude=0.18:duration=15",
 
         "-f",
         "lavfi",
         "-i",
-        f"sine=frequency=86:sample_rate=48000:duration={duration:.2f}",
+        "sine=frequency=86:sample_rate=48000:duration=15",
 
         "-filter_complex",
         (
@@ -2980,7 +2621,7 @@ def add_ambient_sound_to_reel(
             "[2:a]volume=0.035[a2];"
             "[a1][a2]amix=inputs=2:duration=shortest,"
             "afade=t=in:st=0:d=1.2,"
-            f"afade=t=out:st={fade_out_start:.2f}:d=1.5,"
+            "afade=t=out:st=13.5:d=1.5,"
             "alimiter=limit=0.7[aout]"
         ),
 
@@ -3048,6 +2689,7 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             },
         )
 
+        # Recreate final reel with text in the current runner
         clips = extract_reel_motion_clip_urls(existing_links)
 
         local_clip_paths = []
@@ -3069,14 +2711,12 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             output_filename="final_reel_v1_for_sound.mp4",
         )
 
-        total_duration_seconds = max(1, len(local_clip_paths)) * 5.0
         overlay_texts = parse_on_screen_texts(fields, count=3)
 
         final_text_reel_path = add_on_screen_text_to_reel(
             input_video_path=final_reel_path,
             overlay_texts=overlay_texts,
             output_filename="final_reel_text_v1_for_sound.mp4",
-            total_duration_seconds=total_duration_seconds,
         )
 
         final_sound_reel_path = add_ambient_sound_to_reel(
@@ -3109,9 +2749,6 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
         output_lines.append("Sound style:")
         output_lines.append("Subtle ambient room tone + low drone. No voice. No beat.")
         output_lines.append("")
-        output_lines.append(f"Final frame count: {len(local_clip_paths)}")
-        output_lines.append(f"Approx duration seconds: {total_duration_seconds:.0f}")
-        output_lines.append("")
         output_lines.append("Artifact: visual-production-outputs")
         output_lines.append(f"Generated at: {now_iso()}")
 
@@ -3120,7 +2757,6 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             {
                 "Visual Status": STATUS_NEEDS_REVIEW,
                 "Output Links": "\n".join(output_lines).strip(),
-                "Final Frame Count": len(local_clip_paths),
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
@@ -3128,7 +2764,6 @@ Reel Ambient Sound Mode completed.
 
 Created final_reel_sound_v1.mp4.
 Added subtle ambient sound.
-Final frame count: {len(local_clip_paths)}.
 No voiceover.
 No music track.
 Status moved to Needs Visual Review.
@@ -3164,210 +2799,7 @@ Failed at:
             },
         )
 
-        raise
-def airtable_table_url(table_name: str) -> str:
-    return f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{requests.utils.quote(table_name, safe='')}"
-
-
-def create_airtable_record_in_table(table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
-    url = airtable_table_url(table_name)
-
-    payload = {
-        "fields": fields,
-        "typecast": True,
-    }
-
-    response = requests.post(
-        url,
-        headers=airtable_headers(),
-        json=payload,
-        timeout=30,
-    )
-
-    print(f"Create record in {table_name} status:", response.status_code)
-    print(f"Create record in {table_name} preview:", shorten(response.text, 1200))
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-def update_airtable_record_in_table(table_name: str, record_id: str, fields: Dict[str, Any]) -> None:
-    url = f"{airtable_table_url(table_name)}/{record_id}"
-
-    payload = {
-        "fields": fields,
-        "typecast": True,
-    }
-
-    response = requests.patch(
-        url,
-        headers=airtable_headers(),
-        json=payload,
-        timeout=30,
-    )
-
-    print(f"Update record in {table_name} status:", response.status_code)
-    print(f"Update record in {table_name} preview:", shorten(response.text, 1200))
-
-    response.raise_for_status()
-
-
-def get_approved_content_items(limit: int = 5) -> List[Dict[str, Any]]:
-    url = airtable_table_url(AIRTABLE_CONTENT_TABLE_NAME)
-
-    params = {
-        "maxRecords": limit,
-        "filterByFormula": "{Status}='Approved'",
-    }
-
-    response = requests.get(
-        url,
-        headers=airtable_headers(),
-        params=params,
-        timeout=30,
-    )
-
-    print("Read approved Content Inbox status:", response.status_code)
-    print("Read approved Content Inbox preview:", shorten(response.text, 1200))
-
-    response.raise_for_status()
-
-    return response.json().get("records", [])
-
-
-def visual_job_exists_for_content(content_record_id: str) -> bool:
-    url = airtable_table_url(AIRTABLE_TABLE_NAME)
-
-    formula = f"{{Source Content ID}}='{content_record_id}'"
-
-    params = {
-        "maxRecords": 1,
-        "filterByFormula": formula,
-    }
-
-    response = requests.get(
-        url,
-        headers=airtable_headers(),
-        params=params,
-        timeout=30,
-    )
-
-    print("Check existing Visual Job status:", response.status_code)
-    print("Check existing Visual Job preview:", shorten(response.text, 800))
-
-    response.raise_for_status()
-
-    records = response.json().get("records", [])
-
-    return bool(records)
-
-
-def map_content_format_to_visual_format(raw_format: str) -> str:
-    value = (raw_format or "").strip().lower()
-
-    if "reel" in value:
-        return "Reel"
-
-    if "carousel" in value:
-        return "Carousel"
-
-    if "quote" in value:
-        return "Carousel"
-
-    if "story" in value:
-        return "Carousel"
-
-    if "single" in value:
-        return "Carousel"
-
-    return "Reel"
-
-
-def create_visual_job_from_content(content_record: Dict[str, Any]) -> Dict[str, Any]:
-    content_id = content_record["id"]
-    fields = content_record.get("fields", {})
-
-    title = (
-        safe_get(fields, "Visual Headline")
-        or safe_get(fields, "Title")
-        or safe_get(fields, "HOOK")
-        or "Visual Job"
-    )
-
-    raw_text = safe_get(fields, "Raw Text")
-    final_caption = safe_get(fields, "Final Caption")
-    source_hook = safe_get(fields, "HOOK")
-    source_url = safe_get(fields, "Source URL")
-    raw_format = safe_get(fields, "Format")
-
-    visual_format = map_content_format_to_visual_format(raw_format)
-
-    visual_fields = {
-        "Job Title": f"Visual: {title[:80]}",
-        "Source Content ID": content_id,
-        "Source Post Title": title,
-        "Source Raw Text": raw_text,
-        "Source Final Caption": final_caption,
-        "Source Hook": source_hook,
-        "Source URL": source_url,
-        "Format": visual_format,
-        "Chosen Format": visual_format,
-        "Visual Status": STATUS_QUEUED,
-    }
-
-    created = create_airtable_record_in_table(
-        AIRTABLE_TABLE_NAME,
-        visual_fields,
-    )
-
-    visual_job_id = created.get("id", "")
-
-    try:
-        update_airtable_record_in_table(
-            AIRTABLE_CONTENT_TABLE_NAME,
-            content_id,
-            {
-                "Visual Job Created": True,
-                "Visual Job ID": visual_job_id,
-            },
-        )
-    except Exception as exc:
-        print("Warning: Visual Job was created, but Content Inbox could not be updated.")
-        print(repr(exc))
-
-    return created
-
-
-def transfer_approved_content_to_visual_jobs(limit: int = 5) -> Dict[str, Any] | None:
-    print("Checking Content Inbox for Approved items...")
-
-    content_items = get_approved_content_items(limit=limit)
-
-    if not content_items:
-        print("No approved Content Inbox items found.")
-        return None
-
-    for content_record in content_items:
-        content_id = content_record["id"]
-        fields = content_record.get("fields", {})
-        title = safe_get(fields, "Title") or safe_get(fields, "Visual Headline")
-
-        print("Approved content found:", content_id, title)
-
-        if visual_job_exists_for_content(content_id):
-            print("Visual Job already exists for this content. Skipping:", content_id)
-            continue
-
-        created = create_visual_job_from_content(content_record)
-
-        print("Created Visual Job from Content Inbox:", created.get("id"))
-
-        return created
-
-    print("No new approved Content Inbox item available for transfer.")
-
-    return None        
+        raise    
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record["fields"]
@@ -3417,9 +2849,6 @@ def process_record(record: Dict[str, Any]) -> None:
 
             process_reel_keyframes_record(record)
             return
-
-        print(f"Reel record is not actionable. Status: {status_value}")
-        return
 
     try:
         # 1. Brief
@@ -3521,27 +2950,16 @@ def main() -> None:
 
     records = get_queued_visual_jobs(limit=1)
 
-    if records:
-        for record in records:
-            process_record(record)
-
-        print("Visual Production Bot v2 finished.")
+    if not records:
+        print("No queued visual jobs found.")
         return
 
-    print("No queued visual jobs found.")
-    print("Trying to transfer Approved item from Content Inbox...")
+    for record in records:
+        process_record(record)
 
-    created_visual_job = transfer_approved_content_to_visual_jobs(limit=5)
-
-    if created_visual_job:
-        print("A new Visual Job was created and placed in Queue.")
-        print("Run the workflow again to start visual production.")
-        print("Created Visual Job ID:", created_visual_job.get("id"))
-        return
-
-    print("No work found in Visual Jobs or Content Inbox.")
     print("Visual Production Bot v2 finished.")
 
 
 if __name__ == "__main__":
     main()
+
