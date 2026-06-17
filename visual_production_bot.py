@@ -2641,6 +2641,36 @@ def draw_reel_cover_text(image: Image.Image, title: str) -> Image.Image:
         )
 
     return image.convert("RGB")
+def create_reel_cover_from_keyframe(
+    output_links: str,
+    title: str,
+    output_filename: str = "reel_cover_v1.png",
+) -> str:
+    keyframes = extract_reel_keyframe_urls(output_links)
+
+    if not keyframes:
+        raise RuntimeError("No keyframe URL found for reel cover")
+
+    keyframe_url = keyframes[0]["url"]
+
+    response = requests.get(keyframe_url, timeout=120)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download keyframe for reel cover: {keyframe_url}")
+
+    image = Image.open(BytesIO(response.content)).convert("RGB")
+    image = fit_cover_image_to_canvas(image, width=1080, height=1920)
+    image = draw_reel_cover_text(image, title)
+
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / output_filename
+    image.save(output_path, format="PNG", quality=95)
+
+    print("Reel cover created:", output_path)
+
+    return str(output_path)    
 def generate_final_reel_caption(record: Dict[str, Any]) -> Dict[str, Any]:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
