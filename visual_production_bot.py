@@ -3014,7 +3014,7 @@ def process_reel_sound_record(record: Dict[str, Any]) -> None:
             output_filename="final_reel_v1_for_sound.mp4",
         )
 
-        overlay_texts = parse_on_screen_texts(fields, count=3)
+        overlay_texts = parse_on_screen_texts(fields)
 
         final_text_reel_path = add_on_screen_text_to_reel(
             input_video_path=final_reel_path,
