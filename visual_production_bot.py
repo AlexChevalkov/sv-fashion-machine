@@ -1319,8 +1319,62 @@ def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
             f"Expected 3 reel keyframe URLs, found {len(results)}: {results}"
         )
 
-    return results[:3]
+    return results
+    
+def parse_selected_frame_order(text: str, max_frame: int) -> list[int]:
+    text = text or ""
+    numbers = re.findall(r"\d+", text)
 
+    result = []
+    seen = set()
+
+    for number_text in numbers:
+        number = int(number_text)
+
+        if number < 1 or number > max_frame:
+            continue
+
+        if number in seen:
+            continue
+
+        seen.add(number)
+        result.append(number)
+
+    if not result:
+        return list(range(1, max_frame + 1))
+
+    return result
+
+
+def apply_selected_frame_order(
+    keyframes: list[Dict[str, str]],
+    selected_frame_order_text: str,
+    ) -> list[Dict[str, str]]:
+    selected_order = parse_selected_frame_order(
+        selected_frame_order_text,
+        max_frame=len(keyframes),
+    )
+
+    keyframe_by_index = {
+        int(item["index"]): item
+        for item in keyframes
+        if str(item.get("index", "")).isdigit()
+    }
+
+    selected = []
+
+    for index in selected_order:
+        item = keyframe_by_index.get(index)
+        if item:
+            selected.append(item)
+
+    if not selected:
+        return keyframes
+
+    print("Selected frame order:", ",".join(str(x) for x in selected_order))
+    print("Selected keyframes:", [item["index"] for item in selected])
+
+    return selected
 
 def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
@@ -1544,6 +1598,11 @@ def process_reel_motion_record(record: Dict[str, Any]) -> None:
         )
 
         keyframes = extract_reel_keyframe_urls(existing_links)
+                selected_frame_order_text = safe_get(fields, "Selected Frame Order", "")
+        keyframes = apply_selected_frame_order(
+            keyframes,
+            selected_frame_order_text,
+        )
 
         base_prompt = build_reel_motion_prompt(fields)
 
