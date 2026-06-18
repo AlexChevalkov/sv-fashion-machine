@@ -3243,14 +3243,18 @@ def process_record(record: Dict[str, Any]) -> None:
             raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
             output_path = assembled_dir / f"assembled_slide_{slide_num:02d}.png"
 
-            render_assembled_slide(
-                raw_image_path=raw_path,
-                slide_text=slide_texts[idx],
-                slide_num=slide_num,
-                total_slides=slide_count,
-                output_path=output_path,
+            source = Image.open(raw_path)
+            source = fit_image_to_canvas(source)
+
+            result = add_text_overlay(
+                source,
+                slide_texts[idx],
+                slide_num,
+                slide_count,
                 is_cover=(slide_num == 1),
             )
+
+        result.save(output_path, format="PNG", quality=95)
 
             assembled_paths.append(str(output_path))
 
