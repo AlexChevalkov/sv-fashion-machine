@@ -2118,10 +2118,6 @@ def add_on_screen_text_to_reel(
     if video_duration <= 0:
         video_duration = total_segments * 5.0
 
-    # Universal rule:
-    # 2 texts = each gets half of the reel.
-    # 5 texts = each gets one fifth.
-    # 7 texts = each gets one seventh.
     segment_duration = video_duration / total_segments
 
     font_regular = globals().get(
@@ -2196,7 +2192,19 @@ def add_on_screen_text_to_reel(
             "fontcolor=white@0.92"
         )
 
-        # Main editorial text block
+        # Full-width semi-transparent plaque
+        filters.append(
+            "drawbox="
+            f"enable='between(t,{start:.2f},{end:.2f})':"
+            "x=0:"
+            "y=h*0.61:"
+            "w=iw:"
+            "h=240:"
+            "color=black@0.20:"
+            "t=fill"
+        )
+
+        # Main editorial text
         filters.append(
             "drawtext="
             f"fontfile='{font_bold}':"
@@ -2206,10 +2214,7 @@ def add_on_screen_text_to_reel(
             "y=h*0.64:"
             f"fontsize={font_size}:"
             "fontcolor=white:"
-            "line_spacing=8:"
-            "box=1:"
-            "boxcolor=black@0.20:"
-            "boxborderw=24"
+            "line_spacing=8"
         )
 
     filter_chain = ",".join(filters)
