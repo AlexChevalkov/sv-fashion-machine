@@ -706,25 +706,26 @@ def add_text_overlay(
     lines = normalize_overlay_text(slide_text, is_cover=is_cover)
 
     text_area_width = int(CANVAS_W * 0.70) if is_cover else int(CANVAS_W * 0.68)
-    prepared, block_w, block_h = prepare_text_block(draw, lines, is_cover=is_cover, max_width=text_area_width)
+    prepared, block_w, block_h = prepare_text_block(
+        draw,
+        lines,
+        is_cover=is_cover,
+        max_width=text_area_width,
+    )
 
-    box_padding_x = 28
     box_padding_y = 20
+    text_left_padding = 48
 
     if is_cover:
-        box_x = 50
         box_y = int(CANVAS_H * 0.37)
     else:
-        box_x = 50
         box_y = int(CANVAS_H * 0.60)
 
-    rect_w = block_w + box_padding_x * 2
     rect_h = block_h + box_padding_y * 2
 
-    # Полупрозрачная плашка 15–25%
     draw.rectangle(
-        [box_x, box_y, box_x + rect_w, box_y + rect_h],
-        fill=(0, 0, 0, 55)
+        [0, box_y, img.width, box_y + rect_h],
+        fill=(0, 0, 0, 55),
     )
 
     if is_cover:
@@ -736,7 +737,7 @@ def add_text_overlay(
         font_regular = get_font(FONT_REGULAR, 42)
         line_spacing = 6
 
-    cursor_x = box_x + box_padding_x
+    cursor_x = text_left_padding
     cursor_y = box_y + box_padding_y
 
     for role, line in prepared:
@@ -747,153 +748,6 @@ def add_text_overlay(
         cursor_y += h + line_spacing
 
     return Image.alpha_composite(img, overlay).convert("RGB")
-
-
-def fit_image_to_canvas(image: Image.Image) -> Image.Image:
-    image = image.convert("RGB")
-
-    scale = max(CANVAS_W / image.width, CANVAS_H / image.height)
-    new_w = int(image.width * scale)
-    new_h = int(image.height * scale)
-
-    resized = image.resize((new_w, new_h), Image.LANCZOS)
-
-    left = max(0, (new_w - CANVAS_W) // 2)
-    top = max(0, (new_h - CANVAS_H) // 2)
-    right = left + CANVAS_W
-    bottom = top + CANVAS_H
-
-    return resized.crop((left, top, right, bottom))
-
-
-def render_assembled_slide(
-    raw_image_path: Path,
-    slide_text: str,
-    slide_num: int,
-    total_slides: int,
-    output_path: Path,
-    is_cover: bool = False,
-) -> None:
-    source = Image.open(raw_image_path)
-    source = fit_image_to_canvas(source)
-    result = add_text_overlay(source, slide_text, slide_num, total_slides, is_cover=is_cover)
-    result.save(output_path, format="PNG", quality=95)
-
-
-# =========================================================
-# MAIN PIPELINE
-# =========================================================
-def append_note(existing: str, addition: str) -> str:
-    existing = existing or ""
-    addition = addition or ""
-
-    if existing.strip():
-        return existing.strip() + "\n\n---\n\n" + addition.strip()
-
-    return addition.strip()
-
-
-def generate_reel_brief(record: Dict[str, Any]) -> Dict[str, Any]:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-    fields = record["fields"]
-    source_context = build_source_context(fields)
-
-    system_prompt = f"""
-Ты — creative director и reel producer для {BRAND_NAME}.
-
-Задача:
-Сделать production-ready brief для Instagram Reel.
-
-Важно:
-- Пока НЕ генерируем видео.
-- Пока НЕ запускаем Krea.
-- Нужно создать структуру рилса, текст, сценарий, shot list и prompts для будущей генерации.
-- Стиль должен продолжать visual language SV Fashion Media:
-  quiet luxury, editorial intelligence, distance, negative space, fashion as context.
-- Не делать TikTok-кричалку.
-- Не делать рекламный ролик.
-- Не делать глянцевую восторженность.
-- Рилс должен ощущаться как короткая fashion-media колонка в движении.
-
-Тон:
-сухо, умно, точно, премиально.
-"""
-
-    user_prompt = f"""
-Вот контекст исходного поста:
-
-{source_context}
-
-Сделай production package для Reel.
-
-Верни строго валидный JSON без markdown.
-
-Схема:
-{{
-  "job_title": "короткое название reel job",
-  "chosen_format": "Reel",
-  "visual_mode": "Hybrid",
-  "visual_hook": "короткая визуальная идея",
-  "visual_concept": "визуальная концепция рилса",
-  "reel_hook": "первая фраза рилса, до 12 слов",
-  "reel_duration": "30 sec",
-  "reel_script": "voiceover script на русском, 90-130 слов, короткие фразы",
-  "shot_list": "5-7 сцен с таймингом: 0-3 sec, 3-7 sec и т.д.",
-  "on_screen_text": "короткие фразы для экрана, по одной на сцену",
-  "krea_prompt_pack": "prompts на английском для keyframes / motion: cover frame, scene 1, scene 2, scene 3, final frame. Без текста внутри изображения.",
-  "render_notes": "короткие notes: как собирать рилс, темп, музыка, движение камеры"
-}}
-
-Правила:
-- Reel должен быть не пересказом поста, а усилением идеи.
-- Визуал: объект, пустота, дистанция, тень, материал, фактура.
-- Движение: медленное, почти неподвижное, дорогое.
-- Не использовать людей, если они не нужны.
-- Не просить генерировать текст внутри изображения.
-- On-screen text должен быть коротким.
-- Voiceover должен звучать как авторская fashion-колонка.
-"""
-
-    message = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=2200,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    response_text = message.content[0].text
-
-    print("Claude reel brief raw response:")
-    print(response_text)
-
-    brief = extract_json(response_text)
-
-    required = [
-        "job_title",
-        "chosen_format",
-        "visual_mode",
-        "visual_hook",
-        "visual_concept",
-        "reel_hook",
-        "reel_duration",
-        "reel_script",
-        "shot_list",
-        "on_screen_text",
-        "krea_prompt_pack",
-        "render_notes",
-    ]
-
-    for key in required:
-        if key not in brief:
-            raise ValueError(f"Claude reel brief missing key: {key}")
-
-    brief["chosen_format"] = "Reel"
-    brief["visual_mode"] = brief.get("visual_mode") or "Hybrid"
-    brief["reel_duration"] = brief.get("reel_duration") or "30 sec"
-
-    return brief
-
 
 def process_reel_brief_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
@@ -2586,7 +2440,7 @@ def draw_reel_cover_text(base: Image.Image, title: str) -> Image.Image:
     width, height = canvas.size
 
     title = title.upper()
-    font = get_font(FONT_BOLD, 64)
+    font = get_font(FONT_SEMIBOLD, 64)
 
     max_text_width = int(width * 0.78)
     wrapped_lines = wrap_text_lines(draw, title, font, max_text_width)
@@ -2631,7 +2485,7 @@ def draw_reel_cover_text(base: Image.Image, title: str) -> Image.Image:
             (box_x + padding_x, cursor_y),
             line,
             font=font,
-            fill=(255, 255, 255, 255),
+            fill=(0, 0, 0, 78),
         )
 
         cursor_y += line_heights[idx] + line_spacing
