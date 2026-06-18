@@ -3189,33 +3189,8 @@ def process_record(record: Dict[str, Any]) -> None:
 
         print(f"Reel record skipped. Status: {status_value}")
         return
-            if "READY FOR BUFFER PACKAGE" in output_links:
-                print("Ready for Buffer package already generated. Skipping.")
-                return
-
-            if "Final reel with sound generated" in output_links:
-                process_reel_caption_record(record)
-                return
-
-            if "Final reel with text generated" in output_links:
-                process_reel_sound_record(record)
-                return
-
-            if "Final reel assembled" in output_links:
-                process_reel_text_overlay_record(record)
-                return
-
-            if "Reel motion clips generated" in output_links:
-                process_reel_assembly_record(record)
-                return
-
-            if "Reel keyframes generated" in output_links:
-                process_reel_motion_record(record)
-                return
-
-            process_reel_keyframes_record(record)
-            return
-
+            
+            
     try:
         # 1. Brief
         update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
