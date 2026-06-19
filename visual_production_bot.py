@@ -690,6 +690,8 @@ def krea_headers() -> Dict[str, str]:
 
 
 def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) -> str:
+    import time
+
     url = f"{KREA_API_BASE}/generate/image/krea/krea-2/medium"
 
     payload = {
@@ -699,26 +701,46 @@ def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) ->
         "creativity": "low",
     }
 
-    response = requests.post(
-        url,
-        headers=krea_headers(),
-        json=payload,
-        timeout=60,
-    )
+    max_attempts = 6
 
-    print("Create Krea job URL:", url)
-    print("Create Krea job status:", response.status_code)
-    print("Create Krea job preview:", shorten(response.text, 1200))
+    for attempt in range(1, max_attempts + 1):
+        response = requests.post(
+            url,
+            headers=krea_headers(),
+            json=payload,
+            timeout=60,
+        )
 
-    response.raise_for_status()
+        print("Create Krea job URL:", url)
+        print("Create Krea job attempt:", attempt, "of", max_attempts)
+        print("Create Krea job status:", response.status_code)
+        print("Create Krea job preview:", shorten(response.text, 1200))
 
-    data = response.json()
-    job_id = data.get("job_id")
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
 
-    if not job_id:
-        raise RuntimeError(f"Krea did not return job_id: {data}")
+            if retry_after and retry_after.isdigit():
+                wait_seconds = int(retry_after)
+            else:
+                wait_seconds = 30 * attempt
 
-    return job_id
+            print(f"Krea rate limit hit. Waiting {wait_seconds} seconds before retry...")
+            time.sleep(wait_seconds)
+            continue
+
+        response.raise_for_status()
+
+        data = response.json()
+        job_id = data.get("job_id")
+
+        if not job_id:
+            raise RuntimeError(f"Krea did not return job_id: {data}")
+
+        time.sleep(8)
+
+        return job_id
+
+    raise RuntimeError("Krea rate limit: too many requests after retries.")
 
 
 def poll_krea_job(job_id: str, max_wait_seconds: int = 360) -> str:
