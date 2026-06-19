@@ -432,7 +432,151 @@ def format_slide_copy_for_airtable(slide_texts: List[str]) -> str:
     for idx, text in enumerate(slide_texts, start=1):
         lines.append(f"Slide {idx}: {text}")
     return "\n".join(lines)
+    
+def parse_slide_copy_for_generation(
+    slide_copy: str,
+    slide_count: int,
+    carousel_cover: str,
+    fallback_title: str,
+) -> List[str]:
+    raw = (slide_copy or "").replace("\r\n", "\n").strip()
+    slides: List[str] = []
 
+    if raw:
+        matches = list(
+            re.finditer(
+                r"(?im)^\s*(?:slide|слайд)\s*(\d+)\s*[:.)-]\s*",
+                raw,
+            )
+        )
+
+        if matches:
+            chunks = []
+
+            for idx, match in enumerate(matches):
+                number = int(match.group(1))
+                start = match.end()
+                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+                text = raw[start:end].strip()
+                text = re.sub(r"\n+", " ", text).strip()
+
+                if text:
+                    chunks.append((number, text))
+
+            chunks.sort(key=lambda item: item[0])
+            slides = [text for _, text in chunks]
+
+        else:
+            slides = [
+                line.strip()
+                for line in raw.splitlines()
+                if line.strip()
+            ]
+
+    if not slides and carousel_cover:
+        slides = [carousel_cover]
+
+    if not slides:
+        slides = [fallback_title or "EDITORIAL NOTE"]
+
+    while len(slides) < slide_count:
+        slides.append(slides[-1])
+
+    return slides[:slide_count]
+
+
+def build_carousel_prompts_from_krea_prompt_pack(
+    fields: Dict[str, Any],
+    slide_texts: List[str],
+    slide_count: int,
+) -> List[str]:
+    pack = safe_get(fields, "Krea Prompt Pack").strip()
+
+    if not pack:
+        raise RuntimeError("Krea Prompt Pack is empty. Visual Brief Bot must create it first.")
+
+    style_match = re.search(
+        r"(?is)STYLE RULES\s*:\s*(.*?)(?:---\s*NEGATIVE PROMPTS\s*:|NEGATIVE PROMPTS\s*:|$)",
+        pack,
+    )
+
+    negative_match = re.search(
+        r"(?is)NEGATIVE PROMPTS\s*:\s*(.*)$",
+        pack,
+    )
+
+    global_rules = []
+
+    if style_match:
+        global_rules.append("STYLE RULES: " + style_match.group(1).strip())
+
+    if negative_match:
+        global_rules.append("NEGATIVE PROMPTS: " + negative_match.group(1).strip())
+
+    global_rules_text = "\n".join(global_rules).strip()
+
+    carousel_source = re.split(
+        r"(?is)---\s*(?:REEL SCENES|STYLE RULES|NEGATIVE PROMPTS)\s*:?",
+        pack,
+    )[0].strip()
+
+    cover_text = ""
+    cover_match = re.search(
+        r"(?is)COVER IMAGE[^:]*:\s*(.*?)(?:---\s*CAROUSEL|CAROUSEL SLIDE IMAGES|(?:SLIDE|СЛАЙД)\s*2\s*:|$)",
+        carousel_source,
+    )
+
+    if cover_match:
+        cover_text = cover_match.group(1).strip()
+
+    slide_matches = list(
+        re.finditer(
+            r"(?is)(?:SLIDE|СЛАЙД)\s*(\d+)\s*:\s*",
+            carousel_source,
+        )
+    )
+
+    prompt_by_slide: Dict[int, str] = {}
+
+    for idx, match in enumerate(slide_matches):
+        number = int(match.group(1))
+        start = match.end()
+        end = slide_matches[idx + 1].start() if idx + 1 < len(slide_matches) else len(carousel_source)
+
+        text = carousel_source[start:end].strip()
+        text = re.sub(r"(?is)---.*$", "", text).strip()
+
+        if text:
+            prompt_by_slide[number] = text
+
+    prompts: List[str] = []
+
+    for slide_num in range(1, slide_count + 1):
+        if slide_num == 1 and cover_text:
+            prompt = cover_text
+        else:
+            prompt = prompt_by_slide.get(slide_num, "")
+
+        if not prompt:
+            prompt = (
+                f"{pack}\n\n"
+                f"Slide {slide_num} overlay text: {slide_texts[slide_num - 1]}"
+            )
+
+        prompt = f"""
+{prompt}
+
+Overlay text will be added manually.
+Do not generate readable text inside the image.
+No logo. No watermark.
+Leave clear negative space for typography.
+
+{global_rules_text}
+""".strip()
+
+        prompts.append(prompt)
+
+    return prompts
 
 def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -3178,32 +3322,52 @@ def process_record(record: Dict[str, Any]) -> None:
             process_reel_brief_record(record)
             return
 
-    if status_value == STATUS_APPROVED:
-        existing_render_notes = safe_get(fields, "Render Notes", "")
+        if status_value == STATUS_APPROVED:
+            process_reel_after_visual_approval(record)
+            return
 
-        ready_note = (
-            f"Carousel approved by visual review.\n"
-            f"Status moved to Ready for Buffer.\n"
-            f"Approved at: {now_iso()}"
-        )
+        if status_value == STATUS_APPROVED_TEXT:
+            process_reel_after_text_approval(record)
+            return
 
-        if existing_render_notes.strip():
-            render_notes = existing_render_notes.strip() + "\n\n---\n\n" + ready_note
-        else:
-            render_notes = ready_note
-
-        update_airtable_record(
-            record_id,
-            {
-                "Visual Status": STATUS_READY_FOR_BUFFER,
-                "Render Notes": render_notes,
-            },
-        )
-
-        print("Carousel approved. Moved to Ready for Buffer.")
+        print(f"Reel record skipped. Status: {status_value}")
         return
 
-    if status_value != STATUS_BRIEF_READY:
+    output_links_existing = safe_get(fields, "Output Links", "")
+
+    if status_value == STATUS_APPROVED:
+        if (
+            "Assembled local files:" in output_links_existing
+            or "Krea raw images:" in output_links_existing
+            or "assembled_slide_" in output_links_existing
+        ):
+            existing_render_notes = safe_get(fields, "Render Notes", "")
+
+            ready_note = (
+                f"Carousel approved by visual review.\n"
+                f"Status moved to Ready for Buffer.\n"
+                f"Approved at: {now_iso()}"
+            )
+
+            if existing_render_notes.strip():
+                render_notes = existing_render_notes.strip() + "\n\n---\n\n" + ready_note
+            else:
+                render_notes = ready_note
+
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_READY_FOR_BUFFER,
+                    "Render Notes": render_notes,
+                },
+            )
+
+            print("Carousel approved. Moved to Ready for Buffer.")
+            return
+
+        print("Approved Visual but carousel was not generated yet. Generating now.")
+
+    elif status_value != STATUS_BRIEF_READY:
         print(f"Carousel record skipped. Status: {status_value}")
         return
 
@@ -3309,11 +3473,13 @@ def process_record(record: Dict[str, Any]) -> None:
 
         print(f"Done: {record_id}")
         print("Assembled files:")
+
         for path in assembled_paths:
             print(path)
 
     except Exception as error:
         print("ERROR while processing record:", error)
+
         update_airtable_record(
             record_id,
             {
@@ -3321,6 +3487,7 @@ def process_record(record: Dict[str, Any]) -> None:
                 "Render Notes": f"Error at {now_iso()}:\n{str(error)}",
             },
         )
+
         raise
 def main() -> None:
     print("Visual Production Bot v2 started:", now_iso())
