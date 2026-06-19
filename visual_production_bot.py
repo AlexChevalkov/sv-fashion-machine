@@ -743,41 +743,45 @@ def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) ->
     raise RuntimeError("Krea rate limit: too many requests after retries.")
 
 
-def poll_krea_job(job_id: str, max_wait_seconds: int = 360) -> str:
-    url = f"{KREA_API_BASE}/jobs/{job_id}"
-    started = time.time()
+def poll_krea_job(job_id: str) -> str:
+    import time
 
-    while time.time() - started < max_wait_seconds:
+    url = f"{KREA_API_BASE}/jobs/{job_id}"
+
+    max_attempts = 90
+    sleep_seconds = 10
+    last_status = None
+
+    for attempt in range(1, max_attempts + 1):
         response = requests.get(
             url,
-            headers={"Authorization": f"Bearer {KREA_API_KEY}"},
+            headers=krea_headers(),
             timeout=60,
         )
 
         print("Poll Krea URL:", url)
+        print("Poll Krea attempt:", attempt, "of", max_attempts)
         print("Poll Krea status:", response.status_code)
         print("Poll Krea preview:", shorten(response.text, 1200))
 
         response.raise_for_status()
 
         data = response.json()
-        status = data.get("status")
+        status = str(data.get("status", "")).lower()
+        last_status = status
 
-        if status == "completed":
-            result = data.get("result") or {}
-            urls = result.get("urls") or []
+        result = data.get("result") or {}
+        urls = result.get("urls") or []
 
-            if urls:
-                return urls[0]
+        if status == "completed" and urls:
+            return urls[0]
 
-            raise RuntimeError(f"Krea job completed but no image URL found: {data}")
+        if status in {"failed", "error", "cancelled", "canceled"}:
+            raise RuntimeError(f"Krea job failed: {job_id} | status={status}")
 
-        if status in {"failed", "cancelled", "canceled"}:
-            raise RuntimeError(f"Krea job failed: {data}")
+        time.sleep(sleep_seconds)
 
-        time.sleep(5)
-
-    raise TimeoutError(f"Krea job timed out: {job_id}")
+    raise TimeoutError(f"Krea job timed out: {job_id} | last_status={last_status}")
 
 def download_image(url: str, destination: Path) -> None:
     response = requests.get(url, timeout=60)
