@@ -1149,54 +1149,99 @@ Opening thought: {reel_hook}
             name = name.replace("__", "_")
         return name or f"frame_{idx}"
 
-    def parse_krea_prompt_pack(text: str) -> tuple[str, list[tuple[str, str]]]:
-        if not text.strip():
+        def parse_krea_prompt_pack(text: str) -> tuple[str, list[tuple[str, str]]]:
+        raw = (text or "").strip()
+
+        if not raw:
             return "", []
 
-        blocks = []
-        current = []
-
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                if current:
-                    blocks.append(" ".join(current).strip())
-                    current = []
-                continue
-            current.append(line)
-
-        if current:
-            blocks.append(" ".join(current).strip())
+        cleaned = raw.replace("\r\n", "\n")
+        cleaned = cleaned.replace("|", "\n")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
         style_parts = []
-        scene_parts = []
 
-        for block in blocks:
-            lower = block.lower()
+        style_match = re.search(
+            r"(?is)(STYLE RULES.*?)(?=REEL VIDEO STYLE RULES|REEL SCENE PROMPTS|Scene\s*\d+|$)",
+            cleaned,
+        )
+        if style_match:
+            style_parts.append(style_match.group(1).strip())
 
-            if lower.startswith("style rules:"):
-                style_parts.append(block[len("style rules:"):].strip())
+        negative_match = re.search(
+            r"(?is)(NEGATIVE.*?)(?=REEL VIDEO STYLE RULES|REEL SCENE PROMPTS|Scene\s*\d+|$)",
+            cleaned,
+        )
+        if negative_match:
+            style_parts.append(negative_match.group(1).strip())
+
+        style_text = "\n".join(style_parts).strip()
+
+        marker_pattern = re.compile(
+            r"(?is)"
+            r"(COVER\s+IMAGE\s+PROMPT|COVER\s+FRAME|FINAL\s+FRAME|Scene\s*\d+(?:\s*\([^)]+\))?)"
+            r"\s*:\s*"
+        )
+
+        markers = list(marker_pattern.finditer(cleaned))
+
+        scene_parts: list[tuple[str, str]] = []
+
+        for idx, marker in enumerate(markers):
+            label = marker.group(1).strip()
+            start = marker.end()
+            end = markers[idx + 1].start() if idx + 1 < len(markers) else len(cleaned)
+
+            desc = cleaned[start:end].strip()
+            desc = re.sub(
+                r"(?is)(STYLE RULES|NEGATIVE PROMPTS|REEL VIDEO STYLE RULES|REEL SCENE PROMPTS).*",
+                "",
+                desc,
+            ).strip()
+
+            if not desc:
                 continue
 
-            if lower.startswith("global rules:"):
-                style_parts.append(block[len("global rules:"):].strip())
+            lower_label = label.lower()
+
+            if lower_label.startswith("cover image prompt") or lower_label.startswith("cover frame"):
+                scene_parts.append(("start", desc))
                 continue
 
-            if ":" in block:
-                label, desc = block.split(":", 1)
-                label = label.strip()
-                desc = desc.strip()
+            scene_number_match = re.search(r"scene\s*(\d+)", lower_label)
 
-                lower_label = label.lower()
-                if lower_label in {"cover frame", "scene 1", "scene 2", "scene 3", "scene 4", "scene 5", "scene 6", "final frame", "cover", "final"}:
-                    scene_parts.append((label, desc))
-                else:
-                    # if it's not a scene label, treat it as style text
-                    style_parts.append(block)
-            else:
-                style_parts.append(block)
+            if scene_number_match:
+                scene_num = int(scene_number_match.group(1))
+                scene_parts.append((f"scene_{scene_num}", desc))
+                continue
 
-        return " ".join(style_parts).strip(), scene_parts
+            if lower_label.startswith("final frame"):
+                scene_parts.append(("final", desc))
+                continue
+
+        if not scene_parts:
+            return style_text, []
+
+        # We need exactly 3 keyframes: start, middle, final.
+        start_item = scene_parts[0]
+
+        if len(scene_parts) >= 3:
+            middle_item = scene_parts[len(scene_parts) // 2]
+            final_item = scene_parts[-1]
+        elif len(scene_parts) == 2:
+            middle_item = scene_parts[1]
+            final_item = scene_parts[1]
+        else:
+            middle_item = scene_parts[0]
+            final_item = scene_parts[0]
+
+        selected = [
+            ("start", start_item[1]),
+            ("middle", middle_item[1]),
+            ("final", final_item[1]),
+        ]
+
+        return style_text, selected
 
     style_text, scene_parts = parse_krea_prompt_pack(krea_prompt_pack)
 
