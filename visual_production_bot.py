@@ -3450,7 +3450,7 @@ def process_record(record: Dict[str, Any]) -> None:
     safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
     ).strip().lower()
 
-       output_links_value = safe_get(fields, "Output Links", "")
+    output_links_value = safe_get(fields, "Output Links", "")
 
     is_reel_job = (
         "reel" in format_value
