@@ -3466,27 +3466,32 @@ def process_record(record: Dict[str, Any]) -> None:
     print("DEBUG ROUTING output_has_keyframes:", "reel keyframes generated" in output_links_value.lower())
     print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
 
-    # REEL PIPELINE
+       # REEL PIPELINE
     if is_reel_job:
+        print("DEBUG entering reel pipeline")
+
         if status_value == STATUS_BRIEF_READY:
+            print("DEBUG reel action: Brief Ready -> keyframes")
             process_reel_keyframes_record(record)
             return
 
         if status_value == STATUS_QUEUED:
+            print("DEBUG reel action: Queued -> brief")
             process_reel_brief_record(record)
             return
 
         if status_value == STATUS_APPROVED:
+            print("DEBUG reel action: Approved Visual -> assembly/text overlay")
             process_reel_after_visual_approval(record)
             return
 
         if status_value == STATUS_APPROVED_TEXT:
+            print("DEBUG reel action: Approved Text -> ready for buffer")
             process_reel_after_text_approval(record)
             return
 
         print(f"Reel record skipped. Status: {status_value}")
         return
-
     # CAROUSEL FINAL APPROVAL
     if status_value == STATUS_APPROVED_TEXT:
         existing_render_notes = safe_get(fields, "Render Notes", "")
