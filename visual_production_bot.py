@@ -3351,35 +3351,66 @@ def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
 
     try:
         current_record = fetch_airtable_record(record_id)
-        output_links = safe_get(current_record.get("fields", {}), "Output Links", "")
+        fields = current_record.get("fields", {})
+        output_links = safe_get(fields, "Output Links", "")
+        existing_notes = safe_get(fields, "Render Notes", "")
+
+        print("Reel Approved Visual pipeline started.")
+        print("Has motion clips:", "Reel motion clips generated" in output_links)
+        print("Has final reel assembled:", "Final reel assembled" in output_links)
+        print("Has final reel with text:", "Final reel with text generated" in output_links)
 
         if "Reel motion clips generated" not in output_links:
+            print("Step 1: generating reel motion clips...")
             process_reel_motion_record(current_record)
+
             current_record = fetch_airtable_record(record_id)
-            output_links = safe_get(current_record.get("fields", {}), "Output Links", "")
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
 
         if "Final reel assembled" not in output_links:
+            print("Step 2: assembling final reel...")
             process_reel_assembly_record(current_record)
-            current_record = fetch_airtable_record(record_id)
-            output_links = safe_get(current_record.get("fields", {}), "Output Links", "")
 
+            current_record = fetch_airtable_record(record_id)
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
+
+        if "Final reel with text generated" not in output_links:
+            print("Step 3: generating reel text overlay preview...")
             process_reel_text_overlay_record(current_record)
 
-            update_airtable_record(
+            current_record = fetch_airtable_record(record_id)
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
+
+        update_airtable_record(
             record_id,
             {
                 "Visual Status": STATUS_NEEDS_TEXT_REVIEW,
-                "Render Notes": (
-                    f"Auto pipeline after visual approval completed.\n"
-                    f"Motion, assembly and text preview generated.\n"
-                    f"Status moved to Needs Text Review.\n\n"
-                    f"Generated at:\n{now_iso()}"
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Auto pipeline after visual approval completed.
+
+Motion clips checked.
+Final reel assembly checked.
+Text preview generated or checked.
+
+Status moved to Needs Text Review.
+
+Generated at:
+{now_iso()}
+""",
                 ),
             },
         )
 
+        print("Reel Approved Visual pipeline completed. Moved to Needs Text Review.")
+
     except Exception as error:
         print("Auto visual approval pipeline failed:", repr(error))
+
         update_airtable_record(
             record_id,
             {
@@ -3391,6 +3422,7 @@ def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
                 ),
             },
         )
+
         raise
 
 
