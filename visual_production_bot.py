@@ -3450,15 +3450,21 @@ def process_record(record: Dict[str, Any]) -> None:
     safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
     ).strip().lower()
 
-    output_links_value = safe_get(fields, "Output Links", "")
+       output_links_value = safe_get(fields, "Output Links", "")
 
     is_reel_job = (
         "reel" in format_value
-        or "Reel keyframes generated" in output_links_value
-        or "Reel motion clips generated" in output_links_value
-        or "Final reel assembled" in output_links_value
-        or "Final reel with text generated" in output_links_value
+        or "reel keyframes generated" in output_links_value.lower()
+        or "reel motion clips generated" in output_links_value.lower()
+        or "final reel assembled" in output_links_value.lower()
+        or "final reel with text generated" in output_links_value.lower()
     )
+
+    print("DEBUG ROUTING format_value:", repr(format_value))
+    print("DEBUG ROUTING status_value:", repr(status_value))
+    print("DEBUG ROUTING is_reel_job:", is_reel_job)
+    print("DEBUG ROUTING output_has_keyframes:", "reel keyframes generated" in output_links_value.lower())
+    print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
 
     # REEL PIPELINE
     if is_reel_job:
