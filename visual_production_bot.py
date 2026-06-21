@@ -1095,16 +1095,47 @@ def download_reel_image(image_url: str, filename: str) -> str:
 
     return str(output_path)
 
+def parse_reel_keyframe_prompt_blocks(fields: Dict[str, Any]) -> list[Dict[str, str]]:
+    raw = safe_get(fields, "Reel Keyframe Prompts", "").strip()
+
+    if not raw:
+        raise RuntimeError(
+            "Reel Keyframe Prompts is empty. "
+            "Production Bot must use controlled keyframe prompts, not Krea Prompt Pack."
+        )
+
+    parts = [
+        part.strip()
+        for part in re.split(r"\n\s*---\s*\n", raw)
+        if part.strip()
+    ]
+
+    if len(parts) != 3:
+        raise RuntimeError(
+            f"Reel Keyframe Prompts must contain exactly 3 blocks. "
+            f"Got {len(parts)} blocks."
+        )
+
+    names = ["hook", "conflict", "final"]
+
+    return [
+        {
+            "name": names[index],
+            "prompt": prompt,
+        }
+        for index, prompt in enumerate(parts)
+    ]
 
 def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
     title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
     visual_hook = safe_get(fields, "Visual Hook")
     visual_concept = safe_get(fields, "Visual Concept")
     reel_hook = safe_get(fields, "Reel Hook")
-    krea_prompt_pack = safe_get(fields, "Krea Prompt Pack")
+
+    keyframe_blocks = parse_reel_keyframe_prompt_blocks(fields)
 
     shared_rules = f"""
-Create ONE single full-screen vertical photograph.
+Create ONE single full-screen vertical 9:16 fashion editorial photograph.
 
 This is not a storyboard.
 This is not a moodboard.
@@ -1120,198 +1151,67 @@ No grid.
 No split screen.
 No multiple scenes inside the same image.
 
+No text inside the generated image.
+No logos.
+No watermarks.
+No sports advertising.
+No stadium.
+No action shot.
+No cheerful commercial sports mood.
+
 Editorial fashion image.
-Cold editorial light.
+Cold controlled light.
 Matte surfaces.
 Clear negative space.
 Premium magazine background feel.
-No text inside the image.
-No collage.
-No storyboard.
-No moodboard.
-No contact sheet.
 
-Topic: {title}
-Visual hook: {visual_hook}
-Visual concept: {visual_concept}
-Opening thought: {reel_hook}
+Topic:
+{title}
+
+Visual hook:
+{visual_hook}
+
+Visual concept:
+{visual_concept}
+
+Opening thought:
+{reel_hook}
 """.strip()
 
-    def normalize_name(label: str, idx: int) -> str:
-        cleaned = []
-        for ch in label.lower():
-            if ch.isalnum():
-                cleaned.append(ch)
-            else:
-                cleaned.append("_")
-        name = "".join(cleaned).strip("_")
-        while "__" in name:
-            name = name.replace("__", "_")
-        return name or f"frame_{idx}"
+    prompts: list[Dict[str, str]] = []
 
-    def parse_krea_prompt_pack(text: str) -> tuple[str, list[tuple[str, str]]]:
-        raw = (text or "").strip()
+    for index, item in enumerate(keyframe_blocks, start=1):
+        name = item["name"]
+        prompt_body = item["prompt"]
 
-        if not raw:
-            return "", []
-
-        cleaned = raw.replace("\r\n", "\n")
-        cleaned = cleaned.replace("|", "\n")
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-
-        style_parts = []
-
-        style_match = re.search(
-            r"(?is)(STYLE RULES.*?)(?=REEL VIDEO STYLE RULES|REEL SCENE PROMPTS|Scene\s*\d+|$)",
-            cleaned,
-        )
-        if style_match:
-            style_parts.append(style_match.group(1).strip())
-
-        negative_match = re.search(
-            r"(?is)(NEGATIVE.*?)(?=REEL VIDEO STYLE RULES|REEL SCENE PROMPTS|Scene\s*\d+|$)",
-            cleaned,
-        )
-        if negative_match:
-            style_parts.append(negative_match.group(1).strip())
-
-        style_text = "\n".join(style_parts).strip()
-
-        marker_pattern = re.compile(
-            r"(?is)"
-            r"(COVER\s+IMAGE\s+PROMPT|COVER\s+FRAME|FINAL\s+FRAME|Scene\s*\d+(?:\s*\([^)]+\))?)"
-            r"\s*:\s*"
-        )
-
-        markers = list(marker_pattern.finditer(cleaned))
-
-        scene_parts: list[tuple[str, str]] = []
-
-        for idx, marker in enumerate(markers):
-            label = marker.group(1).strip()
-            start = marker.end()
-            end = markers[idx + 1].start() if idx + 1 < len(markers) else len(cleaned)
-
-            desc = cleaned[start:end].strip()
-            desc = re.sub(
-                r"(?is)(STYLE RULES|NEGATIVE PROMPTS|REEL VIDEO STYLE RULES|REEL SCENE PROMPTS).*",
-                "",
-                desc,
-            ).strip()
-
-            if not desc:
-                continue
-
-            lower_label = label.lower()
-
-            if lower_label.startswith("cover image prompt") or lower_label.startswith("cover frame"):
-                scene_parts.append(("start", desc))
-                continue
-
-            scene_number_match = re.search(r"scene\s*(\d+)", lower_label)
-
-            if scene_number_match:
-                scene_num = int(scene_number_match.group(1))
-                scene_parts.append((f"scene_{scene_num}", desc))
-                continue
-
-            if lower_label.startswith("final frame"):
-                scene_parts.append(("final", desc))
-                continue
-
-        if not scene_parts:
-            return style_text, []
-
-        # We need exactly 3 keyframes: start, middle, final.
-        start_item = scene_parts[0]
-
-        if len(scene_parts) >= 3:
-            middle_item = scene_parts[len(scene_parts) // 2]
-            final_item = scene_parts[-1]
-        elif len(scene_parts) == 2:
-            middle_item = scene_parts[1]
-            final_item = scene_parts[1]
-        else:
-            middle_item = scene_parts[0]
-            final_item = scene_parts[0]
-
-        selected = [
-            ("start", start_item[1]),
-            ("middle", middle_item[1]),
-            ("final", final_item[1]),
-        ]
-
-        return style_text, selected
-
-    style_text, scene_parts = parse_krea_prompt_pack(krea_prompt_pack)
-
-    if scene_parts:
-        prompts = []
-
-        for idx, (label, desc) in enumerate(scene_parts, start=1):
-            prompt = f"""
+        prompt = f"""
 {shared_rules}
 
-Additional style rules:
-{style_text}
-
-Frame role: {label}
-
-Scene instruction:
-{desc}
+Controlled keyframe prompt:
+{prompt_body}
 
 Important:
-- Generate exactly ONE image only.
+- Generate exactly ONE still image only.
 - The result must be a single full-frame 9:16 photograph.
-- Do not combine several scenes into one image.
-- Do not create a collage, contact sheet, or storyboard.
-- No repeated variations in one frame.
-- Follow the scene instruction precisely.
+- Do not create motion.
+- Do not create montage.
+- Do not create split-screen.
+- Do not create storyboard.
+- Do not create multiple variations in one frame.
+- Follow the controlled keyframe prompt precisely.
 """.strip()
 
-            prompts.append(
-                {
-                    "name": normalize_name(label, idx),
-                    "prompt": prompt,
-                }
-            )
+        prompts.append(
+            {
+                "name": name,
+                "prompt": prompt,
+            }
+        )
 
-        return prompts
+    print("Using Reel Keyframe Prompts as source of truth.")
+    print("Generated keyframe prompt count:", len(prompts))
 
-    # Fallback if Krea Prompt Pack is empty
-    return [
-        {
-            "name": "start",
-            "prompt": f"""
-{shared_rules}
-
-Create a strong opening frame based on the topic and visual concept.
-Use one clear visual subject only.
-Make it iconic, minimal, editorial, and immediately readable.
-""".strip(),
-        },
-        {
-            "name": "middle",
-            "prompt": f"""
-{shared_rules}
-
-Create a middle frame based on the topic and visual concept.
-Show one symbolic object, material fragment, or coded visual detail.
-Keep strong negative space and a quiet editorial feeling.
-""".strip(),
-        },
-        {
-            "name": "final",
-            "prompt": f"""
-{shared_rules}
-
-Create a final frame based on the topic and visual concept.
-The image should feel conclusive, restrained, and memorable.
-One object or one surface only.
-Very clean, very still, very editorial.
-""".strip(),
-        },
-    ]
+    return prompts
 
 def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
@@ -1370,13 +1270,7 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
                 }
             )
 
-        output_lines = []
-
-        if existing_links.strip():
-            output_lines.append(existing_links.strip())
-            output_lines.append("")
-            output_lines.append("---")
-            output_lines.append("")
+                output_lines = []
 
         output_lines.append("Reel keyframes generated:")
 
