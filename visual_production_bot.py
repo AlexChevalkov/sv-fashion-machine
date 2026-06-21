@@ -1692,7 +1692,7 @@ def process_reel_motion_record(record: Dict[str, Any]) -> None:
             name = item["name"]
             start_image_url = item["url"]
 
-                        motion_instruction = motion_prompt_blocks[len(results)]
+            motion_instruction = motion_prompt_blocks[len(results)]
 
             prompt = f"""
 {base_prompt}
