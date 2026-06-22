@@ -2530,7 +2530,7 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
 
         expected_overlay_count = len(local_clip_paths)
 
-overlay_texts = collect_overlay_texts(fields)
+        overlay_texts = collect_overlay_texts(fields)
 
 if len(overlay_texts) > expected_overlay_count:
     overlay_texts = overlay_texts[:expected_overlay_count]
