@@ -26,7 +26,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install anthropic requests pillow
+          pip install anthropic requests pillow boto3
 
       - name: Run Visual Production Bot
         env:
@@ -38,6 +38,11 @@ jobs:
           AIRTABLE_VIEW_NAME: Queue
           BRAND_NAME: SV FASHION MEDIA
           INSTAGRAM_HANDLE: "@sv_fashionacademy"
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
           GITHUB_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
