@@ -1555,14 +1555,22 @@ The object itself must remain stable and unchanged.
 """.strip()
 
 
-def create_krea_video_job(start_image_url: str, prompt: str, duration: int = 5) -> str:
-    url = f"{KREA_API_BASE}/generate/video/kling/kling-2.5"
+def create_krea_video_job(start_image_url: str, prompt: str, duration: int = 8) -> str:
+    # Veo 3.1 Fast — more reliable than Kling 2.5 (which fails with 'internal'
+    # on Krea) and the strongest 2026 model for fashion garment/product
+    # consistency. Veo duration must be one of 4, 6 or 8 seconds.
+    url = f"{KREA_API_BASE}/generate/video/google/veo-3.1-fast"
+
+    if duration not in (4, 6, 8):
+        duration = 8
 
     payload = {
         "prompt": prompt[:3000],
         "start_image": start_image_url,
         "aspect_ratio": "9:16",
         "duration": duration,
+        "generate_audio": False,
+        "resolution": "720p",
     }
 
     response = requests.post(
@@ -1746,7 +1754,7 @@ Hard rules:
             job_id = create_krea_video_job(
                 start_image_url=start_image_url,
                 prompt=prompt,
-                duration=5,
+                duration=8,
             )
 
             video_url = poll_krea_video_job(job_id)
