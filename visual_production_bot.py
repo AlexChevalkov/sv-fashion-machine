@@ -14,6 +14,8 @@ import requests
 import anthropic
 from PIL import Image, ImageDraw, ImageFont
 
+from r2_storage import r2_is_configured, upload_file_to_r2
+
 
 # =========================================================
 # ENV
@@ -75,6 +77,22 @@ STATUS_ERROR = "Failed"
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def mirror_to_r2(local_path: Any, key: str, fallback_url: str) -> str:
+    """
+    Upload a freshly generated file to Cloudflare R2 and return its PERMANENT
+    public URL. If R2 is not configured, or the upload fails for any reason,
+    return the original (Krea) URL so the pipeline never breaks.
+    """
+    if not r2_is_configured():
+        return fallback_url
+
+    try:
+        return upload_file_to_r2(str(local_path), key)
+    except Exception as exc:
+        print("R2 upload failed, falling back to original URL. Error:", repr(exc))
+        return fallback_url
 
 
 def safe_get(fields: Dict[str, Any], key: str, default: str = "") -> str:
@@ -1260,11 +1278,17 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
                 filename=f"reel_keyframe_{index:02d}_{name}.png",
             )
 
+            permanent_url = mirror_to_r2(
+                local_path,
+                f"bot-output/{record_id}/keyframes/{index:02d}_{name}.png",
+                image_url,
+            )
+
             results.append(
                 {
                     "index": index,
                     "name": name,
-                    "image_url": image_url,
+                    "image_url": permanent_url,
                     "job_id": job_id,
                     "local_path": local_path,
                 }
@@ -1732,11 +1756,17 @@ Hard rules:
                 filename=f"reel_motion_clip_{int(index):02d}_{name}.mp4",
             )
 
+            permanent_url = mirror_to_r2(
+                local_path,
+                f"bot-output/{record_id}/motion/{int(index):02d}_{name}.mp4",
+                video_url,
+            )
+
             results.append(
                 {
                     "index": index,
                     "name": name,
-                    "video_url": video_url,
+                    "video_url": permanent_url,
                     "job_id": job_id,
                     "local_path": local_path,
                 }
@@ -3571,10 +3601,16 @@ def process_record(record: Dict[str, Any]) -> None:
             raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
             download_image(url, raw_path)
 
+            permanent_url = mirror_to_r2(
+                raw_path,
+                f"bot-output/{record_id}/carousel/slide_{slide_num:02d}.png",
+                url,
+            )
+
             raw_items.append(
                 {
                     "slide": str(slide_num),
-                    "url": url,
+                    "url": permanent_url,
                     "job_id": job_id,
                 }
             )
