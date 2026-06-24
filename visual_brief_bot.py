@@ -183,6 +183,12 @@ def generate_visual_brief(job_fields: dict, post_fields: dict) -> dict:
     )
     visual_mode = job_fields.get("Visual Mode", "Hybrid")
 
+    try:
+        keyframe_count = int(float(str(job_fields.get("Keyframe Count") or 3)))
+    except (ValueError, TypeError):
+        keyframe_count = 3
+    keyframe_count = max(2, min(8, keyframe_count))
+
     post_title = post_fields.get("Title", source_post_title)
     hook = post_fields.get("HOOK", "")
     visual_headline = post_fields.get("Visual Headline", "")
@@ -250,16 +256,18 @@ Source URL:
 - Krea Prompt Pack должен быть пригоден для работы в Krea: отдельно image prompts, video prompts, cover prompts, style rules.
 - Krea Prompt Pack должен быть конкретным, но компактным: максимум 3000 знаков.
 - Reel Keyframe Prompts — обязательное поле, если Chosen Format содержит Reel.
-- Reel Keyframe Prompts должен содержать РОВНО 3 prompt-блока.
+- Reel Keyframe Prompts должен содержать РОВНО {keyframe_count} prompt-блоков.
 - Каждый keyframe prompt = одна неподвижная вертикальная 9:16 fashion editorial картинка.
 - Keyframe 1 = hook / opening frame.
-- Keyframe 2 = conflict / core visual argument.
-- Keyframe 3 = final / conclusion frame.
+- Последний keyframe (номер {keyframe_count}) = final / conclusion frame.
+- Промежуточные keyframes = развитие визуального аргумента (conflict, деталь, контраст).
+- Keyframes должны идти логичной последовательностью от hook к final.
 - В Reel Keyframe Prompts запрещены слова и логика: montage, fast cut, sequence, storyboard, split-screen, slow pan, zoom-in, transition, motion, video.
 - Если нужна идея split-screen, перепиши её как один still: comparative flat lay, two objects side by side, controlled editorial composition.
 - Если нужна идея montage, перепиши её как один still: arranged textile details in one controlled composition.
 - Reel Motion Prompts — отдельное поле для motion/video-сцен. Там можно использовать pan, zoom, transition, rhythm edit.
-- Selected Keyframe Scenes должен быть строкой из трёх номеров, например: 1,3,6.
+- Reel Motion Prompts должен содержать РОВНО {keyframe_count} блоков — по одному motion-промпту на каждый keyframe.
+- Selected Keyframe Scenes должен перечислять номера всех {keyframe_count} кадров по порядку через запятую (например 1,2,3).
 - Нельзя использовать Krea Prompt Pack как источник готовых keyframes. Krea Prompt Pack — только общий human-readable summary.
 - Generated Carousel Prompts должен содержать РОВНО столько отдельных промптов, сколько указано в Slide Count.
 - Каждый prompt = только ОДНА картинка для ОДНОГО слайда.
@@ -299,9 +307,9 @@ Source URL:
   "Slide Structure": "структура слайдов 1-7",
   "Slide Copy": "готовый короткий текст для каждого слайда",
   "Krea Prompt Pack": "детальный prompt pack: cover image, carousel images, reel scenes, style rules, negative prompts",
-  "Reel Keyframe Prompts": "ровно 3 отдельных still image prompts для keyframes рилса: hook frame, conflict frame, final frame. Каждый prompt описывает одну неподвижную 9:16 картинку, без motion language, без montage, без split-screen, без storyboard. Разделитель между prompt-блоками строго: пустая строка + --- + пустая строка",
+  "Reel Keyframe Prompts": "ровно {keyframe_count} отдельных still image prompts для keyframes рилса (от hook через развитие к final). Каждый prompt описывает одну неподвижную 9:16 картинку, без motion language, без montage, без split-screen, без storyboard. Разделитель между prompt-блоками строго: пустая строка + --- + пустая строка",
   "Reel Motion Prompts": "отдельные video prompts для motion-сцен рилса. Здесь можно использовать slow zoom, pan, transition, rhythm edit. Разделитель между сценами строго: пустая строка + --- + пустая строка",
-  "Selected Keyframe Scenes": "три номера сцен для keyframes, например: 1,3,6",
+  "Selected Keyframe Scenes": "номера всех {keyframe_count} кадров по порядку через запятую, например: 1,2,3",
   "Generated Carousel Prompts": "готовая строка из отдельных image prompts для каждого слайда, разделённых строго через пустая строка + --- + пустая строка",
   "Krea Model Recommendation": "Manual Choice",
   "Render Notes": "практические заметки: что делать в Krea, какие модели выбрать, что потом наложить вручную"
