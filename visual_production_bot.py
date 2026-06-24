@@ -1570,7 +1570,10 @@ def create_krea_video_job(start_image_url: str, prompt: str, duration: int = 8) 
         "aspect_ratio": "9:16",
         "duration": duration,
         "generate_audio": False,
-        "resolution": "720p",
+        # 1080p (=> 1080x1920 for 9:16). The on-screen text overlay uses fixed
+        # pixel sizes/positions tuned for a 1080-wide frame, so the video must be
+        # 1080 wide or the text renders oversized and mispositioned.
+        "resolution": "1080p",
     }
 
     response = requests.post(
