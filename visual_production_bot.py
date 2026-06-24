@@ -62,6 +62,7 @@ FONT_BOLD = os.environ.get(
 # Statuses
 STATUS_QUEUED = "Queued"
 STATUS_BRIEF_READY = "Brief Ready"
+STATUS_PROMPTS_APPROVED = "Prompts Approved"
 STATUS_RENDERING = "In Production"
 STATUS_NEEDS_REVIEW = "Needs Visual Review"
 STATUS_APPROVED = "Approved Visual"
@@ -166,14 +167,39 @@ def airtable_base_url() -> str:
 
 def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
     """
-    Берём jobs со статусом Queued.
-    Лучше иметь отдельный view Queued Visual Jobs,
-    но если view нет — можно читать всю таблицу и фильтровать формулой.
+    Fetch the next visual job the PRODUCTION bot can actually act on.
+
+    Actionable states:
+      - 'Prompts Approved'  -> generate reel keyframes (AFTER the human reviewed
+                               and approved the keyframe prompts and count).
+      - 'Approved Visual'   -> reel motion / carousel overlay.
+      - 'Approved Text'     -> finalize (sound, caption / ready for buffer).
+      - 'Brief Ready' for CAROUSELS only -> generate raw carousel images.
+
+    Reels at 'Brief Ready' are intentionally NOT fetched: that is the review
+    gate where the human edits the keyframe prompts and sets Keyframe Count,
+    then moves the record to 'Prompts Approved' to start generation.
+
+    We query by formula (not a view) so the gate works no matter how the
+    Airtable views are configured.
     """
     url = airtable_base_url()
+
+    actionable_formula = (
+        "OR("
+        "{Visual Status}='Prompts Approved',"
+        "{Visual Status}='Approved Visual',"
+        "{Visual Status}='Approved Text',"
+        "AND("
+        "{Visual Status}='Brief Ready',"
+        "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format}))"
+        ")"
+        ")"
+    )
+
     params = {
         "maxRecords": limit,
-        "view": AIRTABLE_VIEW_NAME,
+        "filterByFormula": actionable_formula,
     }
 
     response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
@@ -182,30 +208,7 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
 
     response.raise_for_status()
     data = response.json()
-    records = data.get("records", [])
-
-    if not records:
-        # fallback: formula query
-        params = {
-            "maxRecords": limit,
-            "filterByFormula": (
-                "OR("
-                "{Visual Status}='Queued',"
-                "AND("
-                "OR({Format}='Reel',{Chosen Format}='Reel'),"
-                "{Visual Status}='Approved Visual'"
-                ")"
-                ")"
-            ),
-        }
-        response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
-        print("Fallback read status:", response.status_code)
-        print("Fallback read preview:", shorten(response.text, 1200))
-        response.raise_for_status()
-        data = response.json()
-        records = data.get("records", [])
-
-    return records
+    return data.get("records", [])
 
 
 def update_airtable_record(record_id: str, fields: Dict[str, Any]) -> None:
@@ -1128,17 +1131,22 @@ def parse_reel_keyframe_prompt_blocks(fields: Dict[str, Any]) -> list[Dict[str, 
         if part.strip()
     ]
 
-    if len(parts) != 3:
-        raise RuntimeError(
-            f"Reel Keyframe Prompts must contain exactly 3 blocks. "
-            f"Got {len(parts)} blocks."
-        )
+    if not parts:
+        raise RuntimeError("Reel Keyframe Prompts has no usable prompt blocks.")
 
-    names = ["hook", "conflict", "final"]
+    total = len(parts)
+
+    def frame_name(index: int) -> str:
+        # index is 0-based; first = hook, last = final, middle = frame_N
+        if index == 0:
+            return "hook"
+        if index == total - 1:
+            return "final"
+        return f"frame_{index + 1}"
 
     return [
         {
-            "name": names[index],
+            "name": frame_name(index),
             "prompt": prompt,
         }
         for index, prompt in enumerate(parts)
@@ -1476,11 +1484,14 @@ def parse_reel_motion_prompt_blocks(
         if part.strip()
     ]
 
-    if len(parts) < expected_count:
-        raise RuntimeError(
-            f"Reel Motion Prompts has too few blocks. "
-            f"Got {len(parts)}, expected at least {expected_count}."
-        )
+    if not parts:
+        raise RuntimeError("Reel Motion Prompts has no usable blocks.")
+
+    # Keyframe count may differ from the number of motion prompts (the user can
+    # change the keyframe count). If there are too few, reuse the last motion
+    # prompt so the count always matches the number of keyframes.
+    while len(parts) < expected_count:
+        parts.append(parts[-1])
 
     return parts[:expected_count]
     
@@ -3420,9 +3431,17 @@ def process_record(record: Dict[str, Any]) -> None:
     if is_reel_job:
         print("DEBUG entering reel pipeline")
 
-        if status_value == STATUS_BRIEF_READY:
-            print("DEBUG reel action: Brief Ready -> keyframes")
+        if status_value == STATUS_PROMPTS_APPROVED:
+            print("DEBUG reel action: Prompts Approved -> keyframes")
             process_reel_keyframes_record(record)
+            return
+
+        if status_value == STATUS_BRIEF_READY:
+            print("DEBUG reel action: Brief Ready -> waiting for prompt review")
+            print(
+                "Keyframe prompts are ready. Review/edit 'Reel Keyframe Prompts' and "
+                "'Keyframe Count', then set status to 'Prompts Approved' to generate keyframes."
+            )
             return
 
         if status_value == STATUS_QUEUED:
