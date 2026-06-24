@@ -2457,7 +2457,7 @@ def add_on_screen_text_to_reel(
             "drawbox="
             f"enable='between(t,{start:.2f},{end:.2f})':"
             "x=0:"
-            "y=h*0.61:"
+            "y=ih*0.61:"
             "w=iw:"
             "h=240:"
             "color=black@0.20:"
