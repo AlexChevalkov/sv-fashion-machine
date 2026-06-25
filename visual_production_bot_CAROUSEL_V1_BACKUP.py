@@ -3,6 +3,8 @@ import re
 import json
 import math
 import time
+import subprocess
+import textwrap
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime, timezone
@@ -11,6 +13,8 @@ from typing import Any, Dict, List, Tuple
 import requests
 import anthropic
 from PIL import Image, ImageDraw, ImageFont
+
+from r2_storage import r2_is_configured, upload_file_to_r2
 
 
 # =========================================================
@@ -29,6 +33,8 @@ AIRTABLE_VIEW_NAME = os.environ.get("AIRTABLE_VIEW_NAME", "Queued Visual Jobs")
 
 BRAND_NAME = os.environ.get("BRAND_NAME", "SV FASHION MEDIA")
 INSTAGRAM_HANDLE = os.environ.get("INSTAGRAM_HANDLE", "@sv_fashionacademy")
+GITHUB_RUN_URL = os.environ.get("GITHUB_RUN_URL", "")
+GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,9 +61,14 @@ FONT_BOLD = os.environ.get(
 
 # Statuses
 STATUS_QUEUED = "Queued"
-STATUS_BRIEF_READY = "In Production"
+STATUS_BRIEF_READY = "Brief Ready"
+STATUS_PROMPTS_APPROVED = "Prompts Approved"
 STATUS_RENDERING = "In Production"
 STATUS_NEEDS_REVIEW = "Needs Visual Review"
+STATUS_APPROVED = "Approved Visual"
+STATUS_NEEDS_TEXT_REVIEW = "Needs Text Review"
+STATUS_APPROVED_TEXT = "Approved Text"
+STATUS_READY_FOR_BUFFER = "Ready for Buffer"
 STATUS_ERROR = "Failed"
 
 
@@ -67,6 +78,22 @@ STATUS_ERROR = "Failed"
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def mirror_to_r2(local_path: Any, key: str, fallback_url: str) -> str:
+    """
+    Upload a freshly generated file to Cloudflare R2 and return its PERMANENT
+    public URL. If R2 is not configured, or the upload fails for any reason,
+    return the original (Krea) URL so the pipeline never breaks.
+    """
+    if not r2_is_configured():
+        return fallback_url
+
+    try:
+        return upload_file_to_r2(str(local_path), key)
+    except Exception as exc:
+        print("R2 upload failed, falling back to original URL. Error:", repr(exc))
+        return fallback_url
 
 
 def safe_get(fields: Dict[str, Any], key: str, default: str = "") -> str:
@@ -110,6 +137,17 @@ def shorten(text: str, limit: int = 600) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "..."
+def append_note(existing_notes: str, new_note: str) -> str:
+    existing = (existing_notes or "").strip()
+    note = (new_note or "").strip()
+
+    if existing and note:
+        return existing + "\n\n---\n\n" + note
+
+    if note:
+        return note
+
+    return existing
 
 
 # =========================================================
@@ -129,14 +167,39 @@ def airtable_base_url() -> str:
 
 def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
     """
-    Берём jobs со статусом Queued.
-    Лучше иметь отдельный view Queued Visual Jobs,
-    но если view нет — можно читать всю таблицу и фильтровать формулой.
+    Fetch the next visual job the PRODUCTION bot can actually act on.
+
+    Actionable states:
+      - 'Prompts Approved'  -> generate reel keyframes (AFTER the human reviewed
+                               and approved the keyframe prompts and count).
+      - 'Approved Visual'   -> reel motion / carousel overlay.
+      - 'Approved Text'     -> finalize (sound, caption / ready for buffer).
+      - 'Brief Ready' for CAROUSELS only -> generate raw carousel images.
+
+    Reels at 'Brief Ready' are intentionally NOT fetched: that is the review
+    gate where the human edits the keyframe prompts and sets Keyframe Count,
+    then moves the record to 'Prompts Approved' to start generation.
+
+    We query by formula (not a view) so the gate works no matter how the
+    Airtable views are configured.
     """
     url = airtable_base_url()
+
+    actionable_formula = (
+        "OR("
+        "{Visual Status}='Prompts Approved',"
+        "{Visual Status}='Approved Visual',"
+        "{Visual Status}='Approved Text',"
+        "AND("
+        "{Visual Status}='Brief Ready',"
+        "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format}))"
+        ")"
+        ")"
+    )
+
     params = {
         "maxRecords": limit,
-        "view": AIRTABLE_VIEW_NAME,
+        "filterByFormula": actionable_formula,
     }
 
     response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
@@ -145,36 +208,36 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
 
     response.raise_for_status()
     data = response.json()
-    records = data.get("records", [])
-
-    if not records:
-        # fallback: formula query
-        params = {
-            "maxRecords": limit,
-            "filterByFormula": "{Visual Status}='Queued'"
-        }
-        response = requests.get(url, headers=airtable_headers(), params=params, timeout=30)
-        print("Fallback read status:", response.status_code)
-        print("Fallback read preview:", shorten(response.text, 1200))
-        response.raise_for_status()
-        data = response.json()
-        records = data.get("records", [])
-
-    return records
+    return data.get("records", [])
 
 
 def update_airtable_record(record_id: str, fields: Dict[str, Any]) -> None:
     url = f"{airtable_base_url()}/{record_id}"
     payload = {
-    "fields": fields,
-    "typecast": True,
-}
+        "fields": fields,
+        "typecast": True,
+    }
     response = requests.patch(url, headers=airtable_headers(), json=payload, timeout=30)
     print("Update Visual Job status:", response.status_code)
     print("Update Visual Job preview:", shorten(response.text, 1200))
     response.raise_for_status()
 
+def fetch_airtable_record(record_id: str) -> Dict[str, Any]:
+    table_name = requests.utils.quote(AIRTABLE_TABLE_NAME, safe="")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_name}/{record_id}"
 
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+    }
+
+    response = requests.get(url, headers=headers, timeout=60)
+
+    if response.status_code >= 300:
+        raise RuntimeError(
+            f"Airtable fetch failed: {response.status_code} {response.text}"
+        )
+
+    return response.json()
 def build_output_links_text(raw_items: List[Dict[str, str]], assembled_paths: List[str]) -> str:
     lines = []
     lines.append(f"Generated at: {now_iso()}")
@@ -244,10 +307,10 @@ def generate_visual_brief(record: Dict[str, Any]) -> Dict[str, Any]:
 Ты — Visual Editor и Creative Director для {BRAND_NAME}.
 
 Контекст бренда:
-- Умное fashion-медиа
+- Умное, но не скучное fashion-медиа
 - Не глянец ради глянца, а editorial intelligence
-- Минимализм, дистанция, ощущение premium
-- Визуал должен ощущаться как fashion editorial, not stock
+- Умеренный минимализм, дистанция, ощущение premium
+- Визуал должен ощущаться как luxury fashion editorial, not stock
 
 Твоя задача:
 1. Создать visual brief для одного поста
@@ -255,8 +318,8 @@ def generate_visual_brief(record: Dict[str, Any]) -> Dict[str, Any]:
 3. Дать Krea-ready prompts для каждого слайда
 
 ЖЁСТКИЕ ПРАВИЛА:
-- Для карусели всегда выбирай от 5 до 7 слайдов
-- Делай не механические 7, а столько, сколько действительно нужно по смыслу
+- Для карусели всегда выбирай от 5 до 9 слайдов
+- Делай не механические 9, а столько, сколько действительно нужно по смыслу
 - Слайд 1 — cover
 - Последний слайд — чёткий editorial takeaway / финальная мысль
 - Каждый слайд должен содержать КОРОТКИЙ текст
@@ -401,7 +464,229 @@ def format_slide_copy_for_airtable(slide_texts: List[str]) -> str:
     for idx, text in enumerate(slide_texts, start=1):
         lines.append(f"Slide {idx}: {text}")
     return "\n".join(lines)
+    
+def parse_generated_carousel_prompts(
+    fields: Dict[str, Any],
+    slide_count: int,
+) -> List[str]:
+    raw = safe_get(fields, "Generated Carousel Prompts").strip()
 
+    if not raw:
+        raise RuntimeError(
+            "Generated Carousel Prompts is empty. "
+            "Production Bot must use separate slide prompts, not Krea Prompt Pack."
+        )
+
+    parts = [
+        part.strip()
+        for part in re.split(r"\n\s*---\s*\n", raw)
+        if part.strip()
+    ]
+
+    if len(parts) != slide_count:
+        raise RuntimeError(
+            f"Generated Carousel Prompts count mismatch: "
+            f"got {len(parts)}, expected {slide_count}."
+        )
+
+    return parts
+
+def extract_krea_raw_items_from_output_links(output_links: str) -> List[Dict[str, str]]:
+    items: List[Dict[str, str]] = []
+
+    raw = output_links or ""
+
+    matches = re.finditer(
+        r"Slide\s+(\d+):\s*(https?://[^\s|]+)(?:\s*\|\s*job_id:\s*([A-Za-z0-9-]+))?",
+        raw,
+        re.IGNORECASE,
+    )
+
+    for match in matches:
+        items.append(
+            {
+                "slide": match.group(1),
+                "url": match.group(2),
+                "job_id": match.group(3) or "",
+            }
+        )
+
+    items.sort(key=lambda item: int(item["slide"]))
+
+    return items    
+    
+def parse_slide_copy_for_generation(
+    slide_copy: str,
+    slide_count: int,
+    carousel_cover: str,
+    fallback_title: str,
+) -> List[str]:
+    raw = str(slide_copy or "").replace("\r\n", "\n").strip()
+
+    def clean_text(value: str) -> str:
+        value = str(value or "").strip()
+
+        value = re.sub(r"\s+", " ", value).strip()
+        value = value.strip()
+        value = value.strip("|").strip()
+        value = value.strip("«»\"'“”‘’").strip()
+
+        value = re.sub(
+            r"(?i)^\s*(?:slide|слайд)\s*\d+\s*[:：.)-]\s*",
+            "",
+            value,
+        ).strip()
+
+        value = value.strip("«»\"'“”‘’").strip()
+
+        return value
+
+    slides_by_number: Dict[int, str] = {}
+
+    if raw:
+        marker_pattern = re.compile(
+            r"(?i)"
+            r"(?:^|\n|\s*\|\s*)"
+            r"(?:slide|слайд)\s*(\d+)\s*[:：.)-]\s*"
+        )
+
+        markers = list(marker_pattern.finditer(raw))
+
+        if markers:
+            before_first_marker = raw[: markers[0].start()]
+            cover_text = clean_text(before_first_marker)
+
+            if cover_text:
+                slides_by_number[1] = cover_text
+
+            for idx, marker in enumerate(markers):
+                slide_num = int(marker.group(1))
+                start = marker.end()
+                end = markers[idx + 1].start() if idx + 1 < len(markers) else len(raw)
+
+                slide_text = clean_text(raw[start:end])
+
+                if slide_text:
+                    slides_by_number[slide_num] = slide_text
+
+        else:
+            parts = [
+                clean_text(part)
+                for part in re.split(r"\n+|\s+\|\s+", raw)
+                if clean_text(part)
+            ]
+
+            for idx, part in enumerate(parts, start=1):
+                if idx <= slide_count:
+                    slides_by_number[idx] = part
+
+    if 1 not in slides_by_number:
+        cover = clean_text(carousel_cover)
+
+        if cover:
+            slides_by_number[1] = cover
+        else:
+            slides_by_number[1] = clean_text(fallback_title) or "EDITORIAL NOTE"
+
+    slides: List[str] = []
+
+    for slide_num in range(1, slide_count + 1):
+        slides.append(slides_by_number.get(slide_num, ""))
+
+    return slides[:slide_count]
+
+def build_carousel_prompts_from_krea_prompt_pack(
+    fields: Dict[str, Any],
+    slide_texts: List[str],
+    slide_count: int,
+) -> List[str]:
+    pack = safe_get(fields, "Krea Prompt Pack").strip()
+
+    if not pack:
+        raise RuntimeError("Krea Prompt Pack is empty. Visual Brief Bot must create it first.")
+
+    style_match = re.search(
+        r"(?is)STYLE RULES\s*:\s*(.*?)(?:---\s*NEGATIVE PROMPTS\s*:|NEGATIVE PROMPTS\s*:|$)",
+        pack,
+    )
+
+    negative_match = re.search(
+        r"(?is)NEGATIVE PROMPTS\s*:\s*(.*)$",
+        pack,
+    )
+
+    global_rules = []
+
+    if style_match:
+        global_rules.append("STYLE RULES: " + style_match.group(1).strip())
+
+    if negative_match:
+        global_rules.append("NEGATIVE PROMPTS: " + negative_match.group(1).strip())
+
+    global_rules_text = "\n".join(global_rules).strip()
+
+    carousel_source = re.split(
+        r"(?is)---\s*(?:REEL SCENES|STYLE RULES|NEGATIVE PROMPTS)\s*:?",
+        pack,
+    )[0].strip()
+
+    cover_text = ""
+    cover_match = re.search(
+        r"(?is)COVER IMAGE[^:]*:\s*(.*?)(?:---\s*CAROUSEL|CAROUSEL SLIDE IMAGES|(?:SLIDE|СЛАЙД)\s*2\s*:|$)",
+        carousel_source,
+    )
+
+    if cover_match:
+        cover_text = cover_match.group(1).strip()
+
+    slide_matches = list(
+        re.finditer(
+            r"(?is)(?:SLIDE|СЛАЙД)\s*(\d+)\s*:\s*",
+            carousel_source,
+        )
+    )
+
+    prompt_by_slide: Dict[int, str] = {}
+
+    for idx, match in enumerate(slide_matches):
+        number = int(match.group(1))
+        start = match.end()
+        end = slide_matches[idx + 1].start() if idx + 1 < len(slide_matches) else len(carousel_source)
+
+        text = carousel_source[start:end].strip()
+        text = re.sub(r"(?is)---.*$", "", text).strip()
+
+        if text:
+            prompt_by_slide[number] = text
+
+    prompts: List[str] = []
+
+    for slide_num in range(1, slide_count + 1):
+        if slide_num == 1 and cover_text:
+            prompt = cover_text
+        else:
+            prompt = prompt_by_slide.get(slide_num, "")
+
+        if not prompt:
+            prompt = (
+                f"{pack}\n\n"
+                f"Slide {slide_num} overlay text: {slide_texts[slide_num - 1]}"
+            )
+
+        prompt = f"""
+{prompt}
+
+Overlay text will be added manually.
+Do not generate readable text inside the image.
+No logo. No watermark.
+Leave clear negative space for typography.
+
+{global_rules_text}
+""".strip()
+
+        prompts.append(prompt)
+
+    return prompts
 
 def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -419,10 +704,9 @@ def brief_to_airtable_fields(brief: Dict[str, Any]) -> Dict[str, Any]:
         "Carousel Cover": brief["carousel_cover"],
         "Slide Count": brief["slide_count"],
         "Slide Copy": format_slide_copy_for_airtable(brief["slide_texts"]),
-        "Krea Prompt Pack": brief["krea_prompt_pack"],
         "Krea Model Recommendation": "Manual Choice",
         "Render Notes": brief["render_notes"],
-        "Visual Status": STATUS_BRIEF_READY,
+        "Visual Status": STATUS_RENDERING,
     }
 
 
@@ -438,6 +722,8 @@ def krea_headers() -> Dict[str, str]:
 
 
 def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) -> str:
+    import time
+
     url = f"{KREA_API_BASE}/generate/image/krea/krea-2/medium"
 
     payload = {
@@ -447,63 +733,87 @@ def create_krea_image_job(prompt: str, aspect_ratio: str = KREA_ASPECT_RATIO) ->
         "creativity": "low",
     }
 
-    response = requests.post(
-        url,
-        headers=krea_headers(),
-        json=payload,
-        timeout=60,
-    )
+    max_attempts = 6
 
-    print("Create Krea job URL:", url)
-    print("Create Krea job status:", response.status_code)
-    print("Create Krea job preview:", shorten(response.text, 1200))
+    for attempt in range(1, max_attempts + 1):
+        response = requests.post(
+            url,
+            headers=krea_headers(),
+            json=payload,
+            timeout=60,
+        )
 
-    response.raise_for_status()
+        print("Create Krea job URL:", url)
+        print("Create Krea job attempt:", attempt, "of", max_attempts)
+        print("Create Krea job status:", response.status_code)
+        print("Create Krea job preview:", shorten(response.text, 1200))
 
-    data = response.json()
-    job_id = data.get("job_id")
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
 
-    if not job_id:
-        raise RuntimeError(f"Krea did not return job_id: {data}")
+            if retry_after and retry_after.isdigit():
+                wait_seconds = int(retry_after)
+            else:
+                wait_seconds = 30 * attempt
 
-    return job_id
+            print(f"Krea rate limit hit. Waiting {wait_seconds} seconds before retry...")
+            time.sleep(wait_seconds)
+            continue
+
+        response.raise_for_status()
+
+        data = response.json()
+        job_id = data.get("job_id")
+
+        if not job_id:
+            raise RuntimeError(f"Krea did not return job_id: {data}")
+
+        time.sleep(8)
+
+        return job_id
+
+    raise RuntimeError("Krea rate limit: too many requests after retries.")
 
 
-def poll_krea_job(job_id: str, max_wait_seconds: int = 360) -> str:
+def poll_krea_job(job_id: str) -> str:
+    import time
+
     url = f"{KREA_API_BASE}/jobs/{job_id}"
-    started = time.time()
 
-    while time.time() - started < max_wait_seconds:
+    max_attempts = 90
+    sleep_seconds = 10
+    last_status = None
+
+    for attempt in range(1, max_attempts + 1):
         response = requests.get(
             url,
-            headers={"Authorization": f"Bearer {KREA_API_KEY}"},
+            headers=krea_headers(),
             timeout=60,
         )
 
         print("Poll Krea URL:", url)
+        print("Poll Krea attempt:", attempt, "of", max_attempts)
         print("Poll Krea status:", response.status_code)
         print("Poll Krea preview:", shorten(response.text, 1200))
 
         response.raise_for_status()
 
         data = response.json()
-        status = data.get("status")
+        status = str(data.get("status", "")).lower()
+        last_status = status
 
-        if status == "completed":
-            result = data.get("result") or {}
-            urls = result.get("urls") or []
+        result = data.get("result") or {}
+        urls = result.get("urls") or []
 
-            if urls:
-                return urls[0]
+        if status == "completed" and urls:
+            return urls[0]
 
-            raise RuntimeError(f"Krea job completed but no image URL found: {data}")
+        if status in {"failed", "error", "cancelled", "canceled"}:
+            raise RuntimeError(f"Krea job failed: {job_id} | status={status}")
 
-        if status in {"failed", "cancelled", "canceled"}:
-            raise RuntimeError(f"Krea job failed: {data}")
+        time.sleep(sleep_seconds)
 
-        time.sleep(5)
-
-    raise TimeoutError(f"Krea job timed out: {job_id}")
+    raise TimeoutError(f"Krea job timed out: {job_id} | last_status={last_status}")
 
 def download_image(url: str, destination: Path) -> None:
     response = requests.get(url, timeout=60)
@@ -675,25 +985,26 @@ def add_text_overlay(
     lines = normalize_overlay_text(slide_text, is_cover=is_cover)
 
     text_area_width = int(CANVAS_W * 0.70) if is_cover else int(CANVAS_W * 0.68)
-    prepared, block_w, block_h = prepare_text_block(draw, lines, is_cover=is_cover, max_width=text_area_width)
+    prepared, block_w, block_h = prepare_text_block(
+        draw,
+        lines,
+        is_cover=is_cover,
+        max_width=text_area_width,
+    )
 
-    box_padding_x = 28
     box_padding_y = 20
+    text_left_padding = 48
 
     if is_cover:
-        box_x = 50
         box_y = int(CANVAS_H * 0.37)
     else:
-        box_x = 50
         box_y = int(CANVAS_H * 0.60)
 
-    rect_w = block_w + box_padding_x * 2
     rect_h = block_h + box_padding_y * 2
 
-    # Полупрозрачная плашка 15–25%
     draw.rectangle(
-        [box_x, box_y, box_x + rect_w, box_y + rect_h],
-        fill=(0, 0, 0, 55)
+        [0, box_y, img.width, box_y + rect_h],
+        fill=(0, 0, 0, 55),
     )
 
     if is_cover:
@@ -705,7 +1016,7 @@ def add_text_overlay(
         font_regular = get_font(FONT_REGULAR, 42)
         line_spacing = 6
 
-    cursor_x = box_x + box_padding_x
+    cursor_x = text_left_padding
     cursor_y = box_y + box_padding_y
 
     for role, line in prepared:
@@ -717,42 +1028,2391 @@ def add_text_overlay(
 
     return Image.alpha_composite(img, overlay).convert("RGB")
 
+def process_reel_brief_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+    existing_notes = safe_get(fields, "Render Notes", "")
 
-def fit_image_to_canvas(image: Image.Image) -> Image.Image:
+    print("Reel Brief Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    update_airtable_record(
+        record_id,
+        {
+            "Visual Status": STATUS_RENDERING,
+            "Render Notes": append_note(
+                existing_notes,
+                f"Reel Brief Mode started at {now_iso()}",
+            ),
+        },
+    )
+
+    brief = generate_reel_brief(record)
+
+    output_links = f"""
+Reel Brief Mode v1 output:
+No video generated yet.
+No Krea render generated yet.
+
+This record is ready for reel review:
+- Reel Hook
+- Reel Script
+- Shot List
+- On-screen Text
+- Krea Prompt Pack
+
+Generated at:
+{now_iso()}
+""".strip()
+
+    update_airtable_record(
+        record_id,
+        {
+            "Job Title": brief["job_title"],
+            "Format": "Reel",
+            "Chosen Format": "Reel",
+            "Visual Mode": brief["visual_mode"],
+            "Visual Hook": brief["visual_hook"],
+            "Visual Concept": brief["visual_concept"],
+            "Reel Hook": brief["reel_hook"],
+            "Reel Duration": brief["reel_duration"],
+            "Reel Script": brief["reel_script"],
+            "Shot List": brief["shot_list"],
+            "On-screen Text": brief["on_screen_text"],
+            "Krea Model Recommendation": "Manual Choice",
+            "Output Links": output_links,
+            "Render Notes": append_note(
+                existing_notes,
+                f"""
+Reel Brief Mode v1 completed.
+
+{brief["render_notes"]}
+
+Status moved to Needs Visual Review.
+Generated at {now_iso()}
+""",
+            ),
+            "Visual Status": STATUS_NEEDS_REVIEW,
+        },
+    )
+
+    print("Done. Reel brief generated and moved to Needs Visual Review.")
+
+
+def download_reel_image(image_url: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    response = requests.get(image_url, timeout=120)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download reel image: {image_url}")
+
+    output_path = output_dir / filename
+    output_path.write_bytes(response.content)
+
+    print("Saved reel keyframe:", output_path)
+
+    return str(output_path)
+
+def parse_reel_keyframe_prompt_blocks(fields: Dict[str, Any]) -> list[Dict[str, str]]:
+    raw = safe_get(fields, "Reel Keyframe Prompts", "").strip()
+
+    if not raw:
+        raise RuntimeError(
+            "Reel Keyframe Prompts is empty. "
+            "Production Bot must use controlled keyframe prompts, not Krea Prompt Pack."
+        )
+
+    parts = [
+        part.strip()
+        for part in re.split(r"\n\s*---\s*\n", raw)
+        if part.strip()
+    ]
+
+    if not parts:
+        raise RuntimeError("Reel Keyframe Prompts has no usable prompt blocks.")
+
+    total = len(parts)
+
+    def frame_name(index: int) -> str:
+        # index is 0-based; first = hook, last = final, middle = frame_N
+        if index == 0:
+            return "hook"
+        if index == total - 1:
+            return "final"
+        return f"frame_{index + 1}"
+
+    return [
+        {
+            "name": frame_name(index),
+            "prompt": prompt,
+        }
+        for index, prompt in enumerate(parts)
+    ]
+
+def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
+    title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
+    visual_hook = safe_get(fields, "Visual Hook")
+    visual_concept = safe_get(fields, "Visual Concept")
+    reel_hook = safe_get(fields, "Reel Hook")
+
+    keyframe_blocks = parse_reel_keyframe_prompt_blocks(fields)
+
+    shared_rules = f"""
+Create ONE single full-screen vertical 9:16 fashion editorial photograph.
+
+This is not a storyboard.
+This is not a moodboard.
+This is not a contact sheet.
+This is not a collage.
+This is not a sequence.
+
+The entire 9:16 canvas must be one continuous photographic image from top to bottom.
+One camera angle only.
+One composition only.
+No panels.
+No grid.
+No split screen.
+No multiple scenes inside the same image.
+
+No text inside the generated image.
+No logos.
+No watermarks.
+No sports advertising.
+No stadium.
+No action shot.
+No cheerful commercial sports mood.
+
+Editorial fashion image.
+Cold controlled light.
+Matte surfaces.
+Clear negative space.
+Premium magazine background feel.
+
+Topic:
+{title}
+
+Visual hook:
+{visual_hook}
+
+Visual concept:
+{visual_concept}
+
+Opening thought:
+{reel_hook}
+""".strip()
+
+    prompts: list[Dict[str, str]] = []
+
+    for index, item in enumerate(keyframe_blocks, start=1):
+        name = item["name"]
+        prompt_body = item["prompt"]
+
+        prompt = f"""
+{shared_rules}
+
+Controlled keyframe prompt:
+{prompt_body}
+
+Important:
+- Generate exactly ONE still image only.
+- The result must be a single full-frame 9:16 photograph.
+- Do not create motion.
+- Do not create montage.
+- Do not create split-screen.
+- Do not create storyboard.
+- Do not create multiple variations in one frame.
+- Follow the controlled keyframe prompt precisely.
+""".strip()
+
+        prompts.append(
+            {
+                "name": name,
+                "prompt": prompt,
+            }
+        )
+
+    print("Using Reel Keyframe Prompts as source of truth.")
+    print("Generated keyframe prompt count:", len(prompts))
+
+    return prompts
+
+def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Keyframes Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Keyframes Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        prompts = build_reel_keyframe_prompts(fields)
+
+        results = []
+
+        for index, item in enumerate(prompts, start=1):
+            name = item["name"]
+            prompt = item["prompt"]
+
+            print("=" * 80)
+            print(f"Rendering reel keyframe {index}: {name}")
+            print(prompt)
+
+            job_id = create_krea_image_job(
+                prompt=prompt,
+                aspect_ratio="9:16",
+            )
+
+            image_url = poll_krea_job(job_id)
+
+            local_path = download_reel_image(
+                image_url=image_url,
+                filename=f"reel_keyframe_{index:02d}_{name}.png",
+            )
+
+            permanent_url = mirror_to_r2(
+                local_path,
+                f"bot-output/{record_id}/keyframes/{index:02d}_{name}.png",
+                image_url,
+            )
+
+            results.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "image_url": permanent_url,
+                    "job_id": job_id,
+                    "local_path": local_path,
+                }
+            )
+
+            output_lines = []
+
+        output_lines.append("Reel keyframes generated:")
+
+        for item in results:
+            output_lines.append(
+                f"Keyframe {item['index']} — {item['name']}: {item['image_url']} | job_id: {item['job_id']}"
+            )
+
+        output_lines.append("")
+        output_lines.append("Artifact: visual-production-output")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Keyframes Mode completed.
+
+Generated 3 vertical 9:16 keyframes:
+1. Start frame
+2. Middle frame
+3. Final frame
+
+No video generated yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Reel keyframes generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Keyframes Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Keyframes Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise
+
+def extract_reel_keyframe_urls(output_links: str) -> List[Dict[str, str]]:
+    text = output_links or ""
+
+    pattern = r"Keyframe\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError("Could not find reel keyframe image URLs in Output Links")
+
+    seen = set()
+    results: List[Dict[str, str]] = []
+
+    for index_text, url in matches:
+        index = int(index_text)
+
+        if index in seen:
+            continue
+
+        seen.add(index)
+
+        if index == 1:
+            name = "start"
+        elif index == 2:
+            name = "middle"
+        elif index == 3:
+            name = "final"
+        else:
+            name = f"extra_{index}"
+
+        results.append(
+            {
+                "index": str(index),
+                "name": name,
+                "url": url.strip().rstrip(".,)"),
+            }
+        )
+
+    results.sort(key=lambda item: int(item["index"]))
+
+    if len(results) < 3:
+        raise RuntimeError(
+            f"Expected 3 reel keyframe URLs, found {len(results)}: {results}"
+        )
+
+    return results
+    
+def parse_selected_frame_order(text: str, max_frame: int) -> list[int]:
+    text = text or ""
+    numbers = re.findall(r"\d+", text)
+
+    result = []
+    seen = set()
+
+    for number_text in numbers:
+        number = int(number_text)
+
+        if number < 1 or number > max_frame:
+            continue
+
+        if number in seen:
+            continue
+
+        seen.add(number)
+        result.append(number)
+
+    if not result:
+        return list(range(1, max_frame + 1))
+
+    return result
+
+
+def apply_selected_frame_order(
+    keyframes: list[Dict[str, str]],
+    selected_frame_order_text: str,
+    ) -> list[Dict[str, str]]:
+    selected_order = parse_selected_frame_order(
+        selected_frame_order_text,
+        max_frame=len(keyframes),
+    )
+
+    keyframe_by_index = {
+        int(item["index"]): item
+        for item in keyframes
+        if str(item.get("index", "")).isdigit()
+    }
+
+    selected = []
+
+    for index in selected_order:
+        item = keyframe_by_index.get(index)
+        if item:
+            selected.append(item)
+
+    if not selected:
+        return keyframes
+
+    print("Selected frame order:", ",".join(str(x) for x in selected_order))
+    print("Selected keyframes:", [item["index"] for item in selected])
+
+    return selected
+def parse_reel_motion_prompt_blocks(
+    fields: Dict[str, Any],
+    expected_count: int,
+) -> list[str]:
+    raw = safe_get(fields, "Reel Motion Prompts", "").strip()
+
+    if not raw:
+        raise RuntimeError(
+            "Reel Motion Prompts is empty. "
+            "Production Bot must use controlled motion prompts, not generic motion logic."
+        )
+
+    parts = [
+        part.strip()
+        for part in re.split(r"\n\s*---\s*\n", raw)
+        if part.strip()
+    ]
+
+    if not parts:
+        raise RuntimeError("Reel Motion Prompts has no usable blocks.")
+
+    # Keyframe count may differ from the number of motion prompts (the user can
+    # change the keyframe count). If there are too few, reuse the last motion
+    # prompt so the count always matches the number of keyframes.
+    while len(parts) < expected_count:
+        parts.append(parts[-1])
+
+    return parts[:expected_count]
+    
+def build_reel_motion_prompt(fields: Dict[str, Any]) -> str:
+    title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
+    reel_hook = safe_get(fields, "Reel Hook")
+    visual_concept = safe_get(fields, "Visual Concept")
+
+    return f"""
+Create a 5 second vertical fashion editorial video from the provided start image.
+
+ABSOLUTE RULE:
+The provided image is the locked visual reference.
+Do not redesign it.
+Do not reinterpret it.
+Do not change the object.
+Do not change the material.
+Do not change the shape.
+
+The video must preserve:
+- the exact object identity
+- the same silhouette
+- the same texture
+- the same color palette
+- the same background
+- the same negative space
+- the same lighting mood
+- the same fashion editorial atmosphere
+
+Allowed movement only:
+- extremely slow camera push-in
+- very subtle parallax
+- barely visible breathing in the light
+- slight atmospheric depth
+- tiny shadow movement
+
+Forbidden:
+- no morphing
+- no transformation
+- no object deformation
+- no new fabric
+- no additional accessories
+- no logo
+- no text
+- no letters
+- no cuts
+- no montage
+- no fast movement
+- no TikTok style
+- no zoom jump
+
+The video should feel like:
+a moving fashion magazine image,
+quiet luxury,
+editorial intelligence,
+distance,
+restraint,
+negative space.
+
+Topic:
+{title}
+
+Visual concept:
+{visual_concept}
+
+Reel hook:
+{reel_hook}
+
+Final direction:
+Make the image feel alive only through camera and atmosphere.
+The object itself must remain stable and unchanged.
+""".strip()
+
+
+def create_krea_video_job(start_image_url: str, prompt: str, duration: int = 8) -> str:
+    # Veo 3.1 Fast — more reliable than Kling 2.5 (which fails with 'internal'
+    # on Krea) and the strongest 2026 model for fashion garment/product
+    # consistency. Veo duration must be one of 4, 6 or 8 seconds.
+    url = f"{KREA_API_BASE}/generate/video/google/veo-3.1-fast"
+
+    if duration not in (4, 6, 8):
+        duration = 8
+
+    payload = {
+        "prompt": prompt[:3000],
+        "start_image": start_image_url,
+        "aspect_ratio": "9:16",
+        "duration": duration,
+        "generate_audio": False,
+        # 1080p (=> 1080x1920 for 9:16). The on-screen text overlay uses fixed
+        # pixel sizes/positions tuned for a 1080-wide frame, so the video must be
+        # 1080 wide or the text renders oversized and mispositioned.
+        "resolution": "1080p",
+    }
+
+    response = requests.post(
+        url,
+        headers=krea_headers(),
+        json=payload,
+        timeout=60,
+    )
+
+    print("Create Krea video job URL:", url)
+    print("Create Krea video job status:", response.status_code)
+    print("Create Krea video job preview:", shorten(response.text, 1200))
+
+    response.raise_for_status()
+
+    data = response.json()
+    job_id = data.get("job_id")
+
+    if not job_id:
+        raise RuntimeError(f"Krea video did not return job_id: {data}")
+
+    return job_id
+
+
+def extract_video_url_from_krea_result(data: Dict[str, Any]) -> str:
+    result = data.get("result") or {}
+
+    candidates: List[str] = []
+
+    def collect_urls(obj: Any) -> None:
+        if isinstance(obj, str):
+            if obj.startswith("http"):
+                candidates.append(obj)
+            return
+
+        if isinstance(obj, list):
+            for item in obj:
+                collect_urls(item)
+            return
+
+        if isinstance(obj, dict):
+            for value in obj.values():
+                collect_urls(value)
+
+    collect_urls(result)
+
+    if not candidates:
+        raise RuntimeError(f"Krea video completed but no URL found: {data}")
+
+    for url in candidates:
+        lowered = url.lower()
+        if ".mp4" in lowered or "video" in lowered:
+            return url
+
+    return candidates[0]
+
+
+def poll_krea_video_job(job_id: str, max_wait_seconds: int = 600) -> str:
+    url = f"{KREA_API_BASE}/jobs/{job_id}"
+    started = time.time()
+
+    while time.time() - started < max_wait_seconds:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {KREA_API_KEY}"},
+            timeout=60,
+        )
+
+        print("Poll Krea video URL:", url)
+        print("Poll Krea video status:", response.status_code)
+        print("Poll Krea video preview:", shorten(response.text, 1200))
+
+        response.raise_for_status()
+
+        data = response.json()
+        status = data.get("status")
+
+        if status == "completed":
+            return extract_video_url_from_krea_result(data)
+
+        if status in {"failed", "cancelled", "canceled"}:
+            raise RuntimeError(f"Krea video job failed: {data}")
+
+        time.sleep(8)
+
+    raise TimeoutError(f"Krea video job timed out: {job_id}")
+
+
+def download_reel_video(video_url: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    response = requests.get(video_url, timeout=180)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download reel video: {video_url}")
+
+    output_path = output_dir / filename
+    output_path.write_bytes(response.content)
+
+    print("Saved reel motion clip:", output_path)
+
+    return str(output_path)
+
+
+def process_reel_motion_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Motion Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Motion Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        keyframes = extract_reel_keyframe_urls(existing_links)
+
+        selected_frame_order_text = safe_get(fields, "Selected Frame Order", "")
+        keyframes = apply_selected_frame_order(
+            keyframes,
+            selected_frame_order_text,
+        )
+
+        motion_prompt_blocks = parse_reel_motion_prompt_blocks(
+            fields=fields,
+            expected_count=len(keyframes),
+        )
+
+        base_prompt = build_reel_motion_prompt(fields)
+
+        print("Using Reel Motion Prompts as source of truth.")
+        print("Motion prompt block count:", len(motion_prompt_blocks))
+
+        results = []
+
+        for item in keyframes:
+            index = item["index"]
+            name = item["name"]
+            start_image_url = item["url"]
+
+            motion_instruction = motion_prompt_blocks[len(results)]
+
+            prompt = f"""
+{base_prompt}
+
+Controlled motion instruction:
+{motion_instruction}
+
+This motion clip is based on keyframe {index}: {name}.
+
+Hard rules:
+- Preserve this exact source image.
+- Do not redesign the image.
+- Do not change the object.
+- Do not introduce visual elements from other keyframes.
+- Do not add text.
+- Do not add logos.
+- Do not add new symbols.
+- Keep movement minimal, editorial, slow, controlled.
+""".strip()
+
+            print("=" * 80)
+            print(f"Rendering reel motion clip {index}: {name}")
+            print("Using start image URL:", start_image_url)
+            print("Motion prompt:")
+            print(prompt)
+
+            job_id = create_krea_video_job(
+                start_image_url=start_image_url,
+                prompt=prompt,
+                duration=8,
+            )
+
+            video_url = poll_krea_video_job(job_id)
+
+            local_path = download_reel_video(
+                video_url=video_url,
+                filename=f"reel_motion_clip_{int(index):02d}_{name}.mp4",
+            )
+
+            permanent_url = mirror_to_r2(
+                local_path,
+                f"bot-output/{record_id}/motion/{int(index):02d}_{name}.mp4",
+                video_url,
+            )
+
+            results.append(
+                {
+                    "index": index,
+                    "name": name,
+                    "video_url": permanent_url,
+                    "job_id": job_id,
+                    "local_path": local_path,
+                }
+            )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Reel motion clips generated:")
+
+        for item in results:
+            output_lines.append(
+                f"Motion clip {item['index']} — {item['name']}: {item['video_url']} | job_id: {item['job_id']}"
+            )
+            output_lines.append(f"Local file: {item['local_path']}")
+
+        output_lines.append("")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Motion Mode completed.
+
+Generated 3 vertical 5 sec motion clips:
+1. Start
+2. Middle
+3. Final
+
+No final reel assembly yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. 3 reel motion clips generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Motion Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Motion Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise
+def extract_reel_motion_clip_urls(output_links: str) -> List[Dict[str, str]]:
+    text = output_links or ""
+
+    pattern = r"Motion clip\s*(\d+)[^\n:]*:\s*(https?://[^\s|]+)"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    if not matches:
+        raise RuntimeError("Could not find reel motion clip URLs in Output Links")
+
+    seen = set()
+    results: List[Dict[str, str]] = []
+
+    for index_text, url in matches:
+        index = int(index_text)
+
+        if index in seen:
+            continue
+
+        seen.add(index)
+
+        if index == 1:
+            name = "start"
+        elif index == 2:
+            name = "middle"
+        elif index == 3:
+            name = "final"
+        else:
+            name = f"extra_{index}"
+
+        results.append(
+            {
+                "index": str(index),
+                "name": name,
+                "url": url.strip().rstrip(".,)"),
+            }
+        )
+
+    results.sort(key=lambda item: int(item["index"]))
+
+    if len(results) < 3:
+        raise RuntimeError(
+            f"Expected 3 reel motion clip URLs, found {len(results)}: {results}"
+        )
+
+    return results
+
+
+def download_motion_clip(video_url: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    response = requests.get(video_url, timeout=180)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download motion clip: {video_url}")
+
+    output_path = output_dir / filename
+    output_path.write_bytes(response.content)
+
+    print("Downloaded motion clip:", output_path)
+
+    return str(output_path)
+
+
+def assemble_reel_with_ffmpeg(clip_paths: List[str], output_filename: str = "final_reel_v1.mp4") -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    concat_file = output_dir / "concat_list.txt"
+
+    with concat_file.open("w", encoding="utf-8") as f:
+        for path in clip_paths:
+            absolute_path = Path(path).resolve()
+            f.write(f"file '{absolute_path}'\n")
+
+    output_path = output_dir / output_filename
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+
+    print("Running ffmpeg concat:")
+    print(" ".join(command))
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    print("ffmpeg stdout:")
+    print(result.stdout)
+    print("ffmpeg stderr:")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg concat failed with code {result.returncode}")
+
+    print("Final reel assembled:", output_path)
+
+    return str(output_path)
+
+
+def process_reel_assembly_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Assembly Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Assembly Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        clips = extract_reel_motion_clip_urls(existing_links)
+
+        local_clip_paths = []
+
+        for item in clips:
+            index = int(item["index"])
+            name = item["name"]
+            url = item["url"]
+
+            local_path = download_motion_clip(
+                video_url=url,
+                filename=f"source_motion_clip_{index:02d}_{name}.mp4",
+            )
+
+            local_clip_paths.append(local_path)
+
+        final_reel_path = assemble_reel_with_ffmpeg(
+            clip_paths=local_clip_paths,
+            output_filename="final_reel_v1.mp4",
+        )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel assembled:")
+        output_lines.append(f"Local file: {final_reel_path}")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Assembly Mode completed.
+
+Assembled 3 motion clips into final_reel_v1.mp4.
+No text overlay yet.
+No voiceover yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel assembled and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Assembly Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Assembly Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise   
+def clean_overlay_line(line: str) -> str:
+    line = line or ""
+    line = line.strip()
+
+    # remove bullets / numbering
+    line = re.sub(r"^\s*[-•*]\s*", "", line)
+    line = re.sub(r"^\s*\d+[.)]\s*", "", line)
+
+    # remove scene / shot labels
+    line = re.sub(
+        r"^\s*(scene|shot|сцена|кадр)\s*\d+\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    # remove timecodes at the beginning:
+    # 0-3 sec:, 3–8 sec:, 0:03-0:08:, etc.
+    line = re.sub(
+        r"^\s*\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек|секунд)\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    line = re.sub(
+        r"^\s*\d+:\d+\s*[-–]\s*\d+:\d+\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    # remove accidental remaining internal timecode
+    line = re.sub(
+        r"\b\d+\s*[-–]\s*\d+\s*(sec|seconds|с|сек|секунд)\s*[:.-]\s*",
+        "",
+        line,
+        flags=re.IGNORECASE,
+    )
+
+    line = line.strip(" \"'“”«»|")
+    line = re.sub(r"\s+", " ", line).strip()
+
+    return line
+
+
+def wrap_overlay_text(text: str, width: int = 30, max_lines: int = 2) -> str:
+    text = clean_overlay_line(text)
+
+    if not text:
+        return ""
+
+    wrapped = textwrap.wrap(
+        text,
+        width=width,
+        break_long_words=False,
+        replace_whitespace=False,
+    )
+
+    wrapped = wrapped[:max_lines]
+
+    return "\n".join(wrapped)
+
+
+def normalize_field_name(name: str) -> str:
+    name = str(name or "").strip().lower()
+
+    # protect against accidental Cyrillic letters in field names
+    name = name.replace("о", "o")
+    name = name.replace("е", "e")
+    name = name.replace("а", "a")
+
+    name = re.sub(r"[^a-z0-9а-яё]+", "", name)
+
+    return name
+
+
+def get_field_fuzzy(fields: Dict[str, Any], possible_names: List[str], default: str = "") -> str:
+    wanted = {normalize_field_name(name) for name in possible_names}
+
+    for actual_name, value in fields.items():
+        if normalize_field_name(actual_name) in wanted:
+            if value is None:
+                return default
+            if isinstance(value, list):
+                return ", ".join(str(x) for x in value if x is not None)
+            return str(value)
+
+    return default
+
+
+def split_overlay_text_blocks(raw_text: str) -> List[str]:
+    raw_text = (raw_text or "").replace("\r\n", "\n").strip()
+
+    if not raw_text:
+        return []
+
+    # Pick the separator, most explicit first:
+    #   1) lines of --- , 2) blank lines, 3) single newlines (one phrase per
+    #   line), 4) legacy " / " separator when everything is on one line.
+    if re.search(r"(?m)^\s*-{3,}\s*$", raw_text):
+        chunks = re.split(r"(?m)^\s*-{3,}\s*$", raw_text)
+    elif re.search(r"\n\s*\n", raw_text):
+        chunks = re.split(r"\n\s*\n", raw_text)
+    elif "\n" in raw_text:
+        chunks = raw_text.split("\n")
+    else:
+        chunks = re.split(r"\s+/\s+", raw_text)
+
+    blocks: List[str] = []
+
+    for chunk in chunks:
+        lines: List[str] = []
+
+        for raw_line in chunk.splitlines():
+            line = raw_line.strip()
+
+            if not line:
+                continue
+
+            # Remove bullets and numbering.
+            line = re.sub(r"^\s*[-•*]\s*", "", line)
+            line = re.sub(r"^\s*(?:Overlay\s*)?\d+\s*[:.)-]\s*", "", line, flags=re.I)
+            # Remove scene/slide labels like "Сцена 1:", "Scene 2 -", "Слайд 3.".
+            line = re.sub(
+                r"^\s*(?:scene|shot|slide|сцена|кадр|слайд)\s*\d+\s*[:.)-]\s*",
+                "",
+                line,
+                flags=re.I,
+            )
+            # Strip surrounding quotes / guillemets.
+            line = line.strip("«»\"'“”‘’").strip()
+
+            if line:
+                lines.append(line)
+
+        text = "\n".join(lines).strip()
+
+        if text:
+            blocks.append(text)
+
+    return blocks
+
+
+def collect_overlay_texts(fields: Dict[str, Any]) -> List[str]:
+    overlay_texts: List[str] = []
+
+    # 1. Main universal field.
+    overlay_script = safe_get(fields, "Overlay Script", "").strip()
+
+    if overlay_script:
+        overlay_texts = split_overlay_text_blocks(overlay_script)
+
+    # 2. Fallback: existing On-screen Text field.
+    if not overlay_texts:
+        on_screen_text = safe_get(fields, "On-screen Text", "").strip()
+
+        if on_screen_text:
+            overlay_texts = split_overlay_text_blocks(on_screen_text)
+
+    # 3. Fallback: old Overlay 1 / Overlay 2 / Overlay 3 / ... fields.
+    # This is dynamic: it supports Overlay 1 through Overlay 20 without changing code.
+    if not overlay_texts:
+        numbered_overlays = []
+
+        for key, value in fields.items():
+            match = re.fullmatch(r"Overlay\s+(\d+)", str(key).strip(), flags=re.I)
+
+            if not match:
+                continue
+
+            text = str(value or "").strip()
+
+            if not text:
+                continue
+
+            index = int(match.group(1))
+            numbered_overlays.append((index, text))
+
+        numbered_overlays.sort(key=lambda item: item[0])
+
+        overlay_texts = [text for _, text in numbered_overlays]
+
+    # 4. Last fallback: current record hooks only.
+    # No old hardcoded phrases. No previous reel topics.
+    if not overlay_texts:
+        for key in ["Reel Hook", "Visual Hook", "Source Hook", "Source Post Title", "Job Title"]:
+            value = safe_get(fields, key, "").strip()
+
+            if value:
+                overlay_texts.append(value)
+                break
+
+    if not overlay_texts:
+        overlay_texts = ["EDITORIAL NOTE"]
+
+    # Remove exact duplicates.
+    clean_texts: List[str] = []
+    seen = set()
+
+    for text in overlay_texts:
+        text = str(text or "").strip()
+
+        if not text:
+            continue
+
+        key = re.sub(r"\s+", " ", text).lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        clean_texts.append(text)
+
+    print("Overlay texts:")
+    for idx, text in enumerate(clean_texts, start=1):
+        print(f"{idx}: {text}")
+
+    return clean_texts
+
+
+# Backward-compatible wrapper.
+# Old code may still call parse_on_screen_texts(...), but now it uses the universal logic.
+def parse_on_screen_texts(fields: Dict[str, Any], expected_count: int = 0) -> List[str]:
+    return collect_overlay_texts(fields)
+
+def write_drawtext_file(text: str, filename: str) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    path = output_dir / filename
+    path.write_text(text, encoding="utf-8")
+
+    return str(path.resolve())
+
+
+def ffmpeg_escape_text(value: str) -> str:
+    value = value or ""
+    value = value.replace("\\", "\\\\")
+    value = value.replace(":", "\\:")
+    value = value.replace("'", "\\'")
+    return value
+
+
+def get_video_duration_seconds(input_video_path: str) -> float:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(input_video_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print("Could not read video duration with ffprobe.")
+        print(result.stderr)
+        return 0.0
+
+    try:
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def choose_reel_overlay_font_size(text: str) -> int:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    longest_line = max((len(line) for line in lines), default=len(str(text or "")))
+
+    if longest_line <= 18:
+        return 58
+
+    if longest_line <= 26:
+        return 52
+
+    if longest_line <= 34:
+        return 46
+
+    return 40
+
+
+def add_on_screen_text_to_reel(
+    input_video_path: str,
+    overlay_texts: List[str],
+    output_filename: str = "final_reel_text_v1.mp4",
+    segment_duration_seconds: float = 0.0,
+) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / output_filename
+
+    overlay_texts = [str(text or "").strip() for text in overlay_texts if str(text or "").strip()]
+
+    if not overlay_texts:
+        overlay_texts = ["EDITORIAL NOTE"]
+
+    text_files = []
+
+    for idx, text in enumerate(overlay_texts, start=1):
+        text_files.append(
+            write_drawtext_file(
+                text=text,
+                filename=f"onscreen_text_{idx:02d}.txt",
+            )
+        )
+
+    total_segments = max(1, len(text_files))
+
+    video_duration = get_video_duration_seconds(input_video_path)
+
+    if video_duration <= 0:
+        video_duration = total_segments * 5.0
+
+    segment_duration = video_duration / total_segments
+
+    font_regular = globals().get(
+        "FONT_REGULAR",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    )
+
+    font_bold = globals().get(
+        "FONT_BOLD",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+    )
+
+    brand_name = globals().get("BRAND_NAME", "SV FASHION MEDIA")
+    instagram_handle = globals().get("INSTAGRAM_HANDLE", "@sv_fashionacademy")
+
+    filters = []
+
+    # Brand header
+    filters.append(
+        "drawtext="
+        f"fontfile='{font_regular}':"
+        f"text='{ffmpeg_escape_text(brand_name)}':"
+        "x=80:"
+        "y=70:"
+        "fontsize=26:"
+        "fontcolor=white@0.92"
+    )
+
+    # Small brand underline
+    filters.append(
+        "drawbox="
+        "x=80:"
+        "y=125:"
+        "w=120:"
+        "h=2:"
+        "color=white@0.82:"
+        "t=fill"
+    )
+
+    # Instagram handle
+    filters.append(
+        "drawtext="
+        f"fontfile='{font_regular}':"
+        f"text='{ffmpeg_escape_text(instagram_handle)}':"
+        "x=80:"
+        "y=h-95:"
+        "fontsize=22:"
+        "fontcolor=white@0.92"
+    )
+
+    for idx, text_file in enumerate(text_files, start=1):
+        start = (idx - 1) * segment_duration
+
+        if idx == total_segments:
+            end = video_duration + 0.25
+        else:
+            end = idx * segment_duration
+
+        counter = f"{idx:02d}/{total_segments:02d}"
+        text = overlay_texts[idx - 1]
+        font_size = choose_reel_overlay_font_size(text)
+
+        # Counter top-right
+        filters.append(
+            "drawtext="
+            f"fontfile='{font_regular}':"
+            f"text='{counter}':"
+            f"enable='between(t,{start:.2f},{end:.2f})':"
+            "x=w-tw-80:"
+            "y=70:"
+            "fontsize=22:"
+            "fontcolor=white@0.92"
+        )
+
+        # Full-width semi-transparent plaque
+        filters.append(
+            "drawbox="
+            f"enable='between(t,{start:.2f},{end:.2f})':"
+            "x=0:"
+            "y=ih*0.61:"
+            "w=iw:"
+            "h=240:"
+            "color=black@0.20:"
+            "t=fill"
+        )
+
+        # Main editorial text
+        filters.append(
+            "drawtext="
+            f"fontfile='{font_bold}':"
+            f"textfile='{text_file}':"
+            f"enable='between(t,{start:.2f},{end:.2f})':"
+            "x=80:"
+            "y=h*0.64:"
+            f"fontsize={font_size}:"
+            "fontcolor=white:"
+            "line_spacing=8"
+        )
+
+    filter_chain = ",".join(filters)
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_video_path),
+        "-vf",
+        filter_chain,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        str(output_path),
+    ]
+
+    print("Running ffmpeg text overlay:")
+    print(" ".join(command))
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    print("ffmpeg stdout:")
+    print(result.stdout)
+    print("ffmpeg stderr:")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg text overlay failed with code {result.returncode}")
+
+    print("Final reel with text created:", output_path)
+
+    return str(output_path)
+
+def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Text Overlay Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Text Overlay Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        # Re-download the 3 motion clips and assemble again in this runner
+        clips = extract_reel_motion_clip_urls(existing_links)
+
+        local_clip_paths = []
+
+        for item in clips:
+            index = int(item["index"])
+            name = item["name"]
+            url = item["url"]
+
+            local_path = download_motion_clip(
+                video_url=url,
+                filename=f"text_source_motion_clip_{index:02d}_{name}.mp4",
+            )
+
+            local_clip_paths.append(local_path)
+
+        final_reel_path = assemble_reel_with_ffmpeg(
+            clip_paths=local_clip_paths,
+            output_filename="final_reel_v1_for_text.mp4",
+        )
+
+        expected_overlay_count = len(local_clip_paths)
+
+        overlay_texts = collect_overlay_texts(fields)
+
+        if not overlay_texts:
+            overlay_texts = ["EDITORIAL NOTE"]
+
+        if len(overlay_texts) > expected_overlay_count:
+            overlay_texts = overlay_texts[:expected_overlay_count]
+
+        # If there are fewer overlay phrases than clips, reuse the last one so
+        # every clip still gets a caption instead of failing the whole render.
+        while len(overlay_texts) < expected_overlay_count:
+            overlay_texts.append(overlay_texts[-1])
+
+        print("Overlay texts:")
+        for idx, text in enumerate(overlay_texts, start=1):
+            print(f"{idx}: {text}")
+
+        final_text_reel_path = add_on_screen_text_to_reel(
+            input_video_path=final_reel_path,
+            overlay_texts=overlay_texts,
+            output_filename="final_reel_text_v1.mp4",
+        )
+
+        cover_title = (
+            safe_get(fields, "Reel Cover Title")
+            or safe_get(fields, "Source Post Title")
+            or safe_get(fields, "Job Title")
+            or "SV FASHION MEDIA"
+        )
+
+        reel_cover_path = create_reel_cover_from_keyframe(
+            output_links=existing_links,
+            title=cover_title,
+            fields=fields,
+        )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel with text generated:")
+        output_lines.append(f"Local file: {final_text_reel_path}")
+        output_lines.append("")
+        output_lines.append("Reel cover generated:")
+        output_lines.append(f"Local file: {reel_cover_path}")
+        output_lines.append("")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Text Overlay Mode completed.
+
+Created final_reel_text_v1.mp4.
+Added 3 on-screen text overlays.
+No voiceover yet.
+No music yet.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel with text generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Text Overlay Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Text Overlay Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise 
+def get_reel_cover_title(fields: Dict[str, Any], overlay_texts: List[str]) -> str:
+    title = safe_get(fields, "Reel Cover Title", "")
+
+    if not title:
+        title = safe_get(fields, "Overlay 1", "")
+
+    if not title and overlay_texts:
+        title = overlay_texts[0]
+
+    if not title:
+        title = safe_get(fields, "Reel Hook", "")
+
+    if not title:
+        title = "Luxury продаёт дистанцию"
+
+    title = clean_overlay_line(title)
+    title = title.replace("\n", " ").strip()
+
+    return title
+
+
+def fit_cover_image_to_canvas(image: Image.Image, width: int = 1080, height: int = 1920) -> Image.Image:
     image = image.convert("RGB")
 
-    scale = max(CANVAS_W / image.width, CANVAS_H / image.height)
+    scale = max(width / image.width, height / image.height)
     new_w = int(image.width * scale)
     new_h = int(image.height * scale)
 
     resized = image.resize((new_w, new_h), Image.LANCZOS)
 
-    left = max(0, (new_w - CANVAS_W) // 2)
-    top = max(0, (new_h - CANVAS_H) // 2)
-    right = left + CANVAS_W
-    bottom = top + CANVAS_H
+    left = max(0, (new_w - width) // 2)
+    top = max(0, (new_h - height) // 2)
 
-    return resized.crop((left, top, right, bottom))
+    return resized.crop((left, top, left + width, top + height))
 
 
-def render_assembled_slide(
-    raw_image_path: Path,
-    slide_text: str,
-    slide_num: int,
-    total_slides: int,
-    output_path: Path,
-    is_cover: bool = False,
-) -> None:
-    source = Image.open(raw_image_path)
-    source = fit_image_to_canvas(source)
-    result = add_text_overlay(source, slide_text, slide_num, total_slides, is_cover=is_cover)
-    result.save(output_path, format="PNG", quality=95)
+def draw_reel_cover_text(base: Image.Image, title: str) -> Image.Image:
+    canvas = base.convert("RGBA")
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    width, height = canvas.size
+
+    title = title.upper()
+    font = get_font(FONT_BOLD, 64)
+
+    max_text_width = int(width * 0.78)
+    wrapped_lines = wrap_text_lines(draw, title, font, max_text_width)
+    wrapped_lines = wrapped_lines[:4]
+    line_spacing = 10
+    line_heights = []
+
+    total_text_height = 0
+
+    for line in wrapped_lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_h = bbox[3] - bbox[1]
+        line_heights.append(line_h)
+        total_text_height += line_h + line_spacing
+
+    total_text_height = max(0, total_text_height - line_spacing)
+
+    padding_x = 32
+    padding_y = 24
+    text_left_padding = 48
+
+    box_y = int(height * 0.66)
+    box_h = total_text_height + padding_y * 2
+
+    draw.rectangle(
+        [0, box_y, width, box_y + box_h],
+        fill=(0, 0, 0, 76),
+    )
+
+    cursor_y = box_y + padding_y
+
+    for idx, line in enumerate(wrapped_lines):
+        draw.text(
+            (text_left_padding, cursor_y),
+            line,
+            font=font,
+            fill=(255, 255, 255, 255),
+        )
+        cursor_y += line_heights[idx] + line_spacing
+
+    result = Image.alpha_composite(canvas, overlay).convert("RGB")
+    return result
+def create_reel_cover_from_keyframe(
+    output_links: str,
+    title: str,
+    output_filename: str = "reel_cover_v1.png",
+    fields: Dict[str, Any] = None,
+) -> str:
+    fields = fields or {}
+
+    keyframes = extract_reel_keyframe_urls(output_links)
+
+    if not keyframes:
+        raise RuntimeError("No keyframe URL found for reel cover")
+
+    cover_frame_index_text = safe_get(fields, "Cover Frame Index", "").strip()
+
+    cover_frame_index = None
+
+    if cover_frame_index_text:
+        match = re.search(r"\d+", cover_frame_index_text)
+        if match:
+            cover_frame_index = int(match.group(0))
+
+    # If Cover Frame Index is empty, use first selected frame.
+    if cover_frame_index is None:
+        selected_frame_order_text = safe_get(fields, "Selected Frame Order", "").strip()
+        selected_numbers = re.findall(r"\d+", selected_frame_order_text)
+
+        if selected_numbers:
+            cover_frame_index = int(selected_numbers[0])
+
+    selected_keyframe = None
+
+    if cover_frame_index is not None:
+        for item in keyframes:
+            item_index = str(item.get("index", ""))
+
+            if item_index.isdigit() and int(item_index) == cover_frame_index:
+                selected_keyframe = item
+                break
+
+    if selected_keyframe is None:
+        selected_keyframe = keyframes[0]
+
+    keyframe_url = selected_keyframe["url"]
+
+    print("Reel cover selected keyframe:", selected_keyframe)
+
+    response = requests.get(keyframe_url, timeout=120)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Could not download keyframe for reel cover: {keyframe_url}")
+
+    cover_title = safe_get(fields, "Reel Cover Title", "").strip()
+
+    if not cover_title:
+        cover_title = title
+
+    image = Image.open(BytesIO(response.content)).convert("RGB")
+    image = fit_cover_image_to_canvas(image, width=1080, height=1920)
+    image = draw_reel_cover_text(image, cover_title)
+
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / output_filename
+    image.save(output_path, format="PNG", quality=95)
+
+    print("Reel cover created:", output_path)
+
+    return str(output_path)
+def generate_final_reel_caption(record: Dict[str, Any]) -> Dict[str, Any]:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    fields = record.get("fields", {})
+
+    source_title = safe_get(fields, "Source Post Title")
+    reel_hook = safe_get(fields, "Reel Hook")
+    reel_script = safe_get(fields, "Reel Script")
+    visual_concept = safe_get(fields, "Visual Concept")
+
+    overlay_texts = collect_overlay_texts(fields)
+    overlay_lines = "\n".join(
+        f"{idx}. {text}" for idx, text in enumerate(overlay_texts, start=1)
+    )
+
+    system_prompt = f"""
+Ты — fashion editor и автор Instagram caption для {BRAND_NAME}.
+
+Стиль:
+- умно
+- сухо
+- точно
+- без глянцевой восторженности
+- без emoji
+- без продажного тона
+- без "вдохновляемся"
+- без "must-have"
+- без дешёвых hashtags
+
+Формат:
+короткий Instagram caption для fashion-media reel.
+"""
+
+    user_prompt = f"""
+Сделай caption к Instagram Reel.
+
+Контекст:
+Source title: {source_title}
+
+Reel hook:
+{reel_hook}
+
+Visual concept:
+{visual_concept}
+
+Reel script:
+{reel_script}
+
+On-screen text:
+{overlay_lines}
 
 
-# =========================================================
-# MAIN PIPELINE
-# =========================================================
+Верни строго валидный JSON без markdown.
 
+Схема:
+{{
+  "final_reel_caption": "готовый caption на русском"
+}}
+
+Требования к caption:
+- 5–9 коротких строк
+- без emoji
+- без hashtags
+- без прямой продажи
+- звучит как короткая fashion-media колонка
+- тема должна строго соответствовать Source title, Reel hook, Visual concept и Reel script
+- не использовать старые темы из предыдущих рилов
+- не добавлять luxury / дистанцию / желание / недоступность, если этого нет в текущем контексте
+- финальная строка должна быть сильной, но не пафосной
+"""
+
+    message = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=1200,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    response_text = message.content[0].text
+
+    print("Claude final reel caption raw response:")
+    print(response_text)
+
+    data = extract_json(response_text)
+
+    if "final_reel_caption" not in data:
+        raise ValueError("Claude response missing final_reel_caption")
+
+    data["final_reel_caption"] = str(data["final_reel_caption"]).strip()
+
+    return data
+
+
+def process_reel_caption_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Final Reel Caption Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Final Reel Caption Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        caption_data = generate_final_reel_caption(record)
+        final_caption = caption_data["final_reel_caption"]
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel caption generated:")
+        output_lines.append("Stored in Airtable field: Final Reel Caption")
+        output_lines.append("")
+        output_lines.append(build_ready_for_buffer_summary())
+        output_lines.append("")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Final Reel Caption": final_caption,
+                "Visual Status": STATUS_READY_FOR_BUFFER,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Final Reel Caption Mode completed.
+
+Final Reel Caption generated.
+Reel package is ready for Buffer / manual posting.
+
+Status moved to Ready for Buffer.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel caption generated and moved to Ready for Buffer.")
+        print("Final caption:")
+        print(final_caption)
+
+    except Exception as exc:
+        print("Final Reel Caption Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Final Reel Caption Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise
+def build_ready_for_buffer_summary() -> str:
+    lines = []
+
+    lines.append("READY FOR BUFFER PACKAGE")
+    lines.append("")
+    lines.append("Files in GitHub Actions artifact:")
+    lines.append("- final_reel_sound_v1.mp4")
+    lines.append("- reel_cover_v1.png")
+    lines.append("")
+    lines.append("Artifact name:")
+    lines.append("visual-production-outputs")
+    lines.append("")
+
+    if GITHUB_RUN_URL:
+        lines.append("GitHub run:")
+        lines.append(GITHUB_RUN_URL)
+        lines.append("")
+
+    if GITHUB_RUN_ID:
+        lines.append(f"GitHub run id: {GITHUB_RUN_ID}")
+        lines.append("")
+
+    lines.append("Manual publishing checklist:")
+    lines.append("1. Open the GitHub run.")
+    lines.append("2. Download artifact: visual-production-outputs.")
+    lines.append("3. Upload final_reel_sound_v1.mp4 to Buffer / Instagram.")
+    lines.append("4. Use reel_cover_v1.png as cover.")
+    lines.append("5. Copy Final Reel Caption.")
+    lines.append("6. After scheduling, set Visual Status = Sent to Buffer.")
+
+    return "\n".join(lines)
+def add_ambient_sound_to_reel(
+    input_video_path: str,
+    output_filename: str = "final_reel_sound_v1.mp4",
+) -> str:
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / output_filename
+
+    video_duration = get_video_duration_seconds(input_video_path)
+
+    if video_duration <= 0:
+        video_duration = 60.0
+
+    # Make audio slightly longer than video so ffmpeg never cuts the video.
+    audio_duration = video_duration + 1.0
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_video_path),
+
+        "-f",
+        "lavfi",
+        "-i",
+        f"anoisesrc=color=brown:amplitude=0.28:duration={audio_duration:.2f}",
+
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=82:sample_rate=48000:duration={audio_duration:.2f}",
+
+        "-filter_complex",
+        (
+            "[1:a]lowpass=f=1400,highpass=f=55,volume=0.75[a1];"
+            "[2:a]volume=0.07[a2];"
+            "[a1][a2]amix=inputs=2:duration=longest,"
+            "afade=t=in:st=0:d=1.0,"
+            "alimiter=limit=0.85[aout]"
+        ),
+
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+
+        "-t",
+        f"{video_duration:.2f}",
+
+        str(output_path),
+    ]
+
+    print("Running ffmpeg ambient sound:")
+    print(" ".join(command))
+    print("Input video duration:", video_duration)
+    print("Generated audio duration:", audio_duration)
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+
+    print("ffmpeg stdout:")
+    print(result.stdout)
+    print("ffmpeg stderr:")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg ambient sound failed with code {result.returncode}")
+
+    print("Final reel with ambient sound created:", output_path)
+
+    return str(output_path)
+
+
+def process_reel_sound_record(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+    fields = record.get("fields", {})
+
+    existing_links = safe_get(fields, "Output Links", "")
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Reel Ambient Sound Mode detected.")
+    print("Record ID:", record_id)
+    print("Job Title:", safe_get(fields, "Job Title"))
+
+    try:
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"Reel Ambient Sound Mode started at {now_iso()}",
+                ),
+            },
+        )
+
+        # Recreate final reel with text in the current runner
+        clips = extract_reel_motion_clip_urls(existing_links)
+
+        local_clip_paths = []
+
+        for item in clips:
+            index = int(item["index"])
+            name = item["name"]
+            url = item["url"]
+
+            local_path = download_motion_clip(
+                video_url=url,
+                filename=f"sound_source_motion_clip_{index:02d}_{name}.mp4",
+            )
+
+            local_clip_paths.append(local_path)
+
+        final_reel_path = assemble_reel_with_ffmpeg(
+            clip_paths=local_clip_paths,
+            output_filename="final_reel_v1_for_sound.mp4",
+        )
+
+        overlay_texts = parse_on_screen_texts(fields)
+
+        final_text_reel_path = add_on_screen_text_to_reel(
+            input_video_path=final_reel_path,
+            overlay_texts=overlay_texts,
+            output_filename="final_reel_text_v1_for_sound.mp4",
+        )
+
+        final_sound_reel_path = add_ambient_sound_to_reel(
+            input_video_path=final_text_reel_path,
+            output_filename="final_reel_sound_v1.mp4",
+        )
+
+        reel_cover_title = get_reel_cover_title(fields, overlay_texts)
+
+        reel_cover_path = create_reel_cover_from_keyframe(
+            output_links=existing_links,
+            title=(
+                safe_get(fields, "Reel Cover Title")
+                or safe_get(fields, "Source Post Title")
+                or safe_get(fields, "Job Title")
+                or "SV FASHION MEDIA"
+        ),
+            fields=fields,
+        )
+
+        output_lines = []
+
+        if existing_links.strip():
+            output_lines.append(existing_links.strip())
+            output_lines.append("")
+            output_lines.append("---")
+            output_lines.append("")
+
+        output_lines.append("Final reel with sound generated:")
+        output_lines.append(f"Local file: {final_sound_reel_path}")
+        output_lines.append("")
+        output_lines.append("Reel cover generated:")
+        output_lines.append(f"Local file: {reel_cover_path}")
+        output_lines.append("")
+        output_lines.append("Sound style:")
+        output_lines.append("Subtle ambient room tone + low drone. No voice. No beat.")
+        output_lines.append("")
+        output_lines.append("Artifact: visual-production-outputs")
+        output_lines.append(f"Generated at: {now_iso()}")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": "\n".join(output_lines).strip(),
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Ambient Sound Mode completed.
+
+Created final_reel_sound_v1.mp4.
+Added subtle ambient sound.
+No voiceover.
+No music track.
+Status moved to Needs Visual Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Done. Final reel with ambient sound generated and moved to Needs Visual Review.")
+
+    except Exception as exc:
+        print("Reel Ambient Sound Mode failed:", repr(exc))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Reel Ambient Sound Mode failed.
+
+Error:
+{repr(exc)}
+
+Failed at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        raise 
+def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+
+    try:
+        current_record = fetch_airtable_record(record_id)
+        fields = current_record.get("fields", {})
+        output_links = safe_get(fields, "Output Links", "")
+        existing_notes = safe_get(fields, "Render Notes", "")
+
+        print("Reel Approved Visual pipeline started.")
+        print("Has motion clips:", "Reel motion clips generated" in output_links)
+        print("Has final reel assembled:", "Final reel assembled" in output_links)
+        print("Has final reel with text:", "Final reel with text generated" in output_links)
+
+        if "Reel motion clips generated" not in output_links:
+            print("Step 1: generating reel motion clips...")
+            process_reel_motion_record(current_record)
+
+            current_record = fetch_airtable_record(record_id)
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
+
+        if "Final reel assembled" not in output_links:
+            print("Step 2: assembling final reel...")
+            process_reel_assembly_record(current_record)
+
+            current_record = fetch_airtable_record(record_id)
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
+
+        if "Final reel with text generated" not in output_links:
+            print("Step 3: generating reel text overlay preview...")
+            process_reel_text_overlay_record(current_record)
+
+            current_record = fetch_airtable_record(record_id)
+            fields = current_record.get("fields", {})
+            output_links = safe_get(fields, "Output Links", "")
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_TEXT_REVIEW,
+                "Render Notes": append_note(
+                    existing_notes,
+                    f"""
+Auto pipeline after visual approval completed.
+
+Motion clips checked.
+Final reel assembly checked.
+Text preview generated or checked.
+
+Status moved to Needs Text Review.
+
+Generated at:
+{now_iso()}
+""",
+                ),
+            },
+        )
+
+        print("Reel Approved Visual pipeline completed. Moved to Needs Text Review.")
+
+    except Exception as error:
+        print("Auto visual approval pipeline failed:", repr(error))
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": (
+                    f"Auto visual approval pipeline failed.\n\n"
+                    f"Error:\n{repr(error)}\n\n"
+                    f"Failed at:\n{now_iso()}"
+                ),
+            },
+        )
+
+        raise
+
+
+def process_reel_after_text_approval(record: Dict[str, Any]) -> None:
+    record_id = record["id"]
+
+    try:
+        current_record = fetch_airtable_record(record_id)
+
+        process_reel_text_overlay_record(current_record)
+
+        current_record = fetch_airtable_record(record_id)
+        process_reel_sound_record(current_record)
+
+        current_record = fetch_airtable_record(record_id)
+        process_reel_caption_record(current_record)
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_READY_FOR_BUFFER,
+                "Render Notes": (
+                    f"Auto pipeline after text approval completed.\n"
+                    f"Final text, ambient sound, cover and caption generated.\n"
+                    f"Status moved to Ready for Buffer.\n\n"
+                    f"Generated at:\n{now_iso()}"
+                ),
+            },
+        )
+
+    except Exception as error:
+        print("Auto text approval pipeline failed:", repr(error))
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_ERROR,
+                "Render Notes": (
+                    f"Auto text approval pipeline failed.\n\n"
+                    f"Error:\n{repr(error)}\n\n"
+                    f"Failed at:\n{now_iso()}"
+                ),
+            },
+        )
+        raise        
 def process_record(record: Dict[str, Any]) -> None:
     record_id = record["id"]
     fields = record["fields"]
@@ -762,100 +3422,284 @@ def process_record(record: Dict[str, Any]) -> None:
     print(f"Processing record: {record_id}")
     print(f"Job title: {job_title}")
 
+    status_value = safe_get(fields, "Visual Status", "").strip()
+
+    format_value = (
+    safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
+    ).strip().lower()
+
+    output_links_value = safe_get(fields, "Output Links", "")
+
+    is_reel_job = (
+        "reel" in format_value
+        or "reel keyframes generated" in output_links_value.lower()
+        or "reel motion clips generated" in output_links_value.lower()
+        or "final reel assembled" in output_links_value.lower()
+        or "final reel with text generated" in output_links_value.lower()
+    )
+
+    print("DEBUG ROUTING format_value:", repr(format_value))
+    print("DEBUG ROUTING status_value:", repr(status_value))
+    print("DEBUG ROUTING is_reel_job:", is_reel_job)
+    print("DEBUG ROUTING output_has_keyframes:", "reel keyframes generated" in output_links_value.lower())
+    print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
+
+       # REEL PIPELINE
+    if is_reel_job:
+        print("DEBUG entering reel pipeline")
+
+        if status_value == STATUS_PROMPTS_APPROVED:
+            print("DEBUG reel action: Prompts Approved -> keyframes")
+            process_reel_keyframes_record(record)
+            return
+
+        if status_value == STATUS_BRIEF_READY:
+            print("DEBUG reel action: Brief Ready -> waiting for prompt review")
+            print(
+                "Keyframe prompts are ready. Review/edit 'Reel Keyframe Prompts' and "
+                "'Keyframe Count', then set status to 'Prompts Approved' to generate keyframes."
+            )
+            return
+
+        if status_value == STATUS_QUEUED:
+            print("DEBUG reel action: Queued -> brief")
+            process_reel_brief_record(record)
+            return
+
+        if status_value == STATUS_APPROVED:
+            print("DEBUG reel action: Approved Visual -> assembly/text overlay")
+            process_reel_after_visual_approval(record)
+            return
+
+        if status_value == STATUS_APPROVED_TEXT:
+            print("DEBUG reel action: Approved Text -> ready for buffer")
+            process_reel_after_text_approval(record)
+            return
+
+        print(f"Reel record skipped. Status: {status_value}")
+        return
+    # CAROUSEL FINAL APPROVAL
+    if status_value == STATUS_APPROVED_TEXT:
+        existing_render_notes = safe_get(fields, "Render Notes", "")
+
+        ready_note = (
+            f"Carousel text approved.\n"
+            f"Status moved to Ready for Buffer.\n"
+            f"Approved at: {now_iso()}"
+        )
+
+        if existing_render_notes.strip():
+            render_notes = existing_render_notes.strip() + "\n\n---\n\n" + ready_note
+        else:
+            render_notes = ready_note
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_READY_FOR_BUFFER,
+                "Render Notes": render_notes,
+            },
+        )
+
+        print("Carousel text approved. Moved to Ready for Buffer.")
+        return
+
+    # CAROUSEL TEXT OVERLAY AFTER VISUAL APPROVAL
+    if status_value == STATUS_APPROVED:
+        output_links_existing = safe_get(fields, "Output Links", "")
+        raw_items = extract_krea_raw_items_from_output_links(output_links_existing)
+
+        if not raw_items:
+            print("Carousel Approved Visual, but no Krea raw image links found. Generating raw images first.")
+            status_value = STATUS_BRIEF_READY
+        else:
+            try:
+                update_airtable_record(
+                    record_id,
+                    {
+                        "Visual Status": STATUS_RENDERING,
+                    },
+                )
+
+                slide_count = len(raw_items)
+
+                slide_texts = parse_slide_copy_for_generation(
+                    slide_copy=safe_get(fields, "Slide Copy"),
+                    slide_count=slide_count,
+                    carousel_cover=safe_get(fields, "Carousel Cover"),
+                    fallback_title=safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title"),
+                )
+                print("Parsed carousel slide texts:")
+                for debug_idx, debug_text in enumerate(slide_texts, start=1):
+                    print(f"Slide {debug_idx} overlay text:", debug_text[:500])
+                
+                raw_dir = OUTPUT_DIR / record_id / "raw"
+                assembled_dir = OUTPUT_DIR / record_id / "assembled"
+                ensure_dir(raw_dir)
+                ensure_dir(assembled_dir)
+
+                assembled_paths: List[str] = []
+
+                for idx, item in enumerate(raw_items):
+                    slide_num = idx + 1
+                    raw_url = item["url"]
+
+                    print(f"Assembling overlay slide {slide_num}/{slide_count}")
+                    print("Raw image URL:", raw_url)
+
+                    raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
+                    output_path = assembled_dir / f"assembled_slide_{slide_num:02d}.png"
+
+                    download_image(raw_url, raw_path)
+
+                    source = Image.open(raw_path)
+                    source = fit_cover_image_to_canvas(source)
+
+                    result = add_text_overlay(
+                        source,
+                        slide_texts[idx],
+                        slide_num,
+                        slide_count,
+                        is_cover=(slide_num == 1),
+                    )
+
+                    result.save(output_path, format="PNG", quality=95)
+
+                    assembled_paths.append(str(output_path))
+
+                output_links = build_output_links_text(raw_items, assembled_paths)
+
+                existing_render_notes = safe_get(fields, "Render Notes", "")
+
+                production_note = (
+                    f"Carousel overlay text assembled.\n"
+                    f"Generated at: {now_iso()}"
+                )
+
+                if existing_render_notes.strip():
+                    render_notes = existing_render_notes.strip() + "\n\n---\n\n" + production_note
+                else:
+                    render_notes = production_note
+
+                update_airtable_record(
+                    record_id,
+                    {
+                        "Visual Status": STATUS_NEEDS_TEXT_REVIEW,
+                        "Output Links": output_links,
+                        "Render Notes": render_notes,
+                    },
+                )
+
+                print("Carousel overlays assembled. Moved to Needs Text Review.")
+                return
+
+            except Exception as error:
+                print("ERROR while assembling carousel overlays:", error)
+
+                update_airtable_record(
+                    record_id,
+                    {
+                        "Visual Status": STATUS_ERROR,
+                        "Render Notes": f"Error at {now_iso()}:\n{str(error)}",
+                    },
+                )
+
+                raise
+
+    # CAROUSEL RAW IMAGE GENERATION
+    if status_value != STATUS_BRIEF_READY:
+        print(f"Carousel record skipped. Status: {status_value}")
+        return
+
     try:
-        # 1. Brief
-        update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
-        brief = generate_visual_brief(record)
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_RENDERING,
+            },
+        )
 
-        brief_fields = brief_to_airtable_fields(brief)
-        brief_fields["Visual Status"] = STATUS_RENDERING
-        update_airtable_record(record_id, brief_fields)
+        slide_count = clamp_slide_count(safe_get(fields, "Slide Count", "6"))
 
-        slide_count = clamp_slide_count(brief["slide_count"])
-        slide_texts = brief["slide_texts"]
-        krea_prompts = brief["krea_prompts"]
+        krea_prompts = parse_generated_carousel_prompts(
+            fields=fields,
+            slide_count=slide_count,
+        )
 
-        # 2. Krea render
         raw_dir = OUTPUT_DIR / record_id / "raw"
-        assembled_dir = OUTPUT_DIR / record_id / "assembled"
         ensure_dir(raw_dir)
-        ensure_dir(assembled_dir)
 
         raw_items: List[Dict[str, str]] = []
-        assembled_paths: List[str] = []
 
         for idx in range(slide_count):
             slide_num = idx + 1
             prompt = krea_prompts[idx]
 
-            print(f"Rendering slide {slide_num}/{slide_count}")
+            print(f"Rendering raw slide {slide_num}/{slide_count}")
             print("Prompt:", prompt)
 
-            job_id = create_krea_image_job(prompt=prompt, aspect_ratio=KREA_ASPECT_RATIO)
+            job_id = create_krea_image_job(
+                prompt=prompt,
+                aspect_ratio=KREA_ASPECT_RATIO,
+            )
+
             url = poll_krea_job(job_id)
 
             raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
             download_image(url, raw_path)
 
-            raw_items.append({
-                "slide": str(slide_num),
-                "url": url,
-                "job_id": job_id
-            })
-
-        # 3. Assembly
-        for idx in range(slide_count):
-            slide_num = idx + 1
-            raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
-            output_path = assembled_dir / f"assembled_slide_{slide_num:02d}.png"
-
-            source = Image.open(raw_path)
-            source = fit_image_to_canvas(source)
-            result = add_text_overlay(
-                source,
-                slide_texts[idx],
-                slide_num,
-                slide_count,
-                is_cover=(slide_num == 1),
+            permanent_url = mirror_to_r2(
+                raw_path,
+                f"bot-output/{record_id}/carousel/slide_{slide_num:02d}.png",
+                url,
             )
-            result.save(output_path, format="PNG", quality=95)
 
-            assembled_paths.append(str(output_path))
-
-        # 4. Save result in Airtable
-        output_links = build_output_links_text(raw_items, assembled_paths)
-
-        final_fields = {
-            "Visual Status": STATUS_NEEDS_REVIEW,
-            "Output Links": output_links,
-            "Slide Count": slide_count,
-            "Slide Copy": format_slide_copy_for_airtable(slide_texts),
-            "Render Notes": (
-                f"{brief['render_notes']}\n\n"
-                f"Final assembled carousel saved in GitHub Actions artifact and outputs folder.\n"
-                f"Generated at: {now_iso()}"
+            raw_items.append(
+                {
+                    "slide": str(slide_num),
+                    "url": permanent_url,
+                    "job_id": job_id,
+                }
             )
-        }
 
-        update_airtable_record(record_id, final_fields)
+        output_links = build_output_links_text(raw_items, [])
 
-        print(f"Done: {record_id}")
-        print("Assembled files:")
-        for p in assembled_paths:
-            print(p)
+        existing_render_notes = safe_get(fields, "Render Notes", "")
+
+        production_note = (
+            f"Raw carousel images generated.\n"
+            f"Generated at: {now_iso()}"
+        )
+
+        if existing_render_notes.strip():
+            render_notes = existing_render_notes.strip() + "\n\n---\n\n" + production_note
+        else:
+            render_notes = production_note
+
+        update_airtable_record(
+            record_id,
+            {
+                "Visual Status": STATUS_NEEDS_REVIEW,
+                "Output Links": output_links,
+                "Slide Count": slide_count,
+                "Render Notes": render_notes,
+            },
+        )
+
+        print("Raw carousel images generated. Moved to Needs Visual Review.")
 
     except Exception as error:
         print("ERROR while processing record:", error)
+
         update_airtable_record(
             record_id,
             {
                 "Visual Status": STATUS_ERROR,
-                "Render Notes": f"Error at {now_iso()}:\n{str(error)}"
-            }
+                "Render Notes": f"Error at {now_iso()}:\n{str(error)}",
+            },
         )
+
         raise
-
-
 def main() -> None:
     print("Visual Production Bot v2 started:", now_iso())
 
@@ -873,3 +3717,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
