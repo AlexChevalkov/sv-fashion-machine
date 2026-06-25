@@ -1158,55 +1158,20 @@ def parse_reel_keyframe_prompt_blocks(fields: Dict[str, Any]) -> list[Dict[str, 
     ]
 
 def build_reel_keyframe_prompts(fields: Dict[str, Any]) -> list[Dict[str, str]]:
-    title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title")
-    visual_hook = safe_get(fields, "Visual Hook")
-    visual_concept = safe_get(fields, "Visual Concept")
-    reel_hook = safe_get(fields, "Reel Hook")
-
+    # The user's own keyframe prompts (from 'Reel Keyframe Prompts') are the
+    # source of truth and already contain all creative direction. We deliberately
+    # DO NOT inject Topic / Visual Hook / Visual Concept / Reel Hook here: that
+    # shared preamble was identical for every keyframe (making all images look
+    # alike) and leaked hook phrases as rendered text into the pictures.
+    # We also do NOT force "no text" globally, because some keyframes (e.g. a
+    # closing typographic frame) intentionally contain text — each prompt decides.
     keyframe_blocks = parse_reel_keyframe_prompt_blocks(fields)
 
-    shared_rules = f"""
-Create ONE single full-screen vertical 9:16 fashion editorial photograph.
-
-This is not a storyboard.
-This is not a moodboard.
-This is not a contact sheet.
-This is not a collage.
-This is not a sequence.
-
-The entire 9:16 canvas must be one continuous photographic image from top to bottom.
-One camera angle only.
-One composition only.
-No panels.
-No grid.
-No split screen.
-No multiple scenes inside the same image.
-
-No text inside the generated image.
-No logos.
-No watermarks.
-No sports advertising.
-No stadium.
-No action shot.
-No cheerful commercial sports mood.
-
-Editorial fashion image.
-Cold controlled light.
-Matte surfaces.
-Clear negative space.
-Premium magazine background feel.
-
-Topic:
-{title}
-
-Visual hook:
-{visual_hook}
-
-Visual concept:
-{visual_concept}
-
-Opening thought:
-{reel_hook}
+    technical_rules = """
+Technical constraints (do not override the creative description above):
+- One single full-frame vertical 9:16 image. One camera angle, one composition.
+- Not a collage, grid, split-screen, contact sheet, storyboard or sequence. No panels.
+- No logos. No watermarks. No motion.
 """.strip()
 
     prompts: list[Dict[str, str]] = []
@@ -1215,22 +1180,9 @@ Opening thought:
         name = item["name"]
         prompt_body = item["prompt"]
 
-        prompt = f"""
-{shared_rules}
+        prompt = f"""{prompt_body}
 
-Controlled keyframe prompt:
-{prompt_body}
-
-Important:
-- Generate exactly ONE still image only.
-- The result must be a single full-frame 9:16 photograph.
-- Do not create motion.
-- Do not create montage.
-- Do not create split-screen.
-- Do not create storyboard.
-- Do not create multiple variations in one frame.
-- Follow the controlled keyframe prompt precisely.
-""".strip()
+{technical_rules}""".strip()
 
         prompts.append(
             {
@@ -1239,7 +1191,7 @@ Important:
             }
         )
 
-    print("Using Reel Keyframe Prompts as source of truth.")
+    print("Using Reel Keyframe Prompts as source of truth (no shared topic preamble).")
     print("Generated keyframe prompt count:", len(prompts))
 
     return prompts
