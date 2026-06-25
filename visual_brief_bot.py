@@ -263,6 +263,7 @@ Source URL:
 - Промежуточные keyframes = развитие визуального аргумента (conflict, деталь, контраст).
 - Keyframes должны идти логичной последовательностью от hook к final.
 - В Reel Keyframe Prompts запрещены слова и логика: montage, fast cut, sequence, storyboard, split-screen, slow pan, zoom-in, transition, motion, video.
+- В Reel Keyframe Prompts и Krea Prompt Pack избегай формулировок, которые рубит AI-модерация: обнажённость, эротика, явное/голое тело, nude, naked, bare torso, underwear, провокация. Даже если тема архива связана с телом — переводи идею в одежду, ткань, силуэт, фактуру, архивную деталь, абстракцию. Кадры должны быть editorial и безопасными для генерации.
 - Если нужна идея split-screen, перепиши её как один still: comparative flat lay, two objects side by side, controlled editorial composition.
 - Если нужна идея montage, перепиши её как один still: arranged textile details in one controlled composition.
 - Reel Motion Prompts — отдельное поле для motion/video-сцен. Там можно использовать pan, zoom, transition, rhythm edit.
