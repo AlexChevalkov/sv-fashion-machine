@@ -1849,6 +1849,48 @@ Generated at:
     except Exception as exc:
         print("Reel Motion Mode failed:", repr(exc))
 
+        error_text = repr(exc)
+
+        # A Krea video failure that survives all retries is almost always one
+        # specific keyframe Veo cannot animate — typically a pure typographic /
+        # text card or a near-empty/black frame. Return the record to the review
+        # gate and name the failing keyframe so the user can fix just that frame,
+        # instead of dying as 'Failed'.
+        try:
+            failed_frame = f"keyframe {index} ({name})"
+        except NameError:
+            failed_frame = "a keyframe"
+
+        if "krea video job failed" in error_text.lower():
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_BRIEF_READY,
+                    "Render Notes": append_note(
+                        existing_notes,
+                        f"""
+Veo не смог сделать видео из {failed_frame} (ошибка 'internal' после 3 попыток).
+
+Обычно так бывает, если кадр — чисто типографическая карточка (текст на фоне)
+или почти пустой/очень тёмный кадр: image-to-video такие не оживляет.
+
+Что делать:
+1. В поле Reel Keyframe Prompts сделайте этот кадр ФОТОГРАФИЧЕСКИМ
+   (реальная editorial-сцена, без чистого текста). Закрывающий текст бот всё равно
+   наложит сам через On-screen Text — кадр не обязан содержать текст.
+2. Снова поставьте Prompts Approved, затем (после кадров) Approved Visual.
+
+Подробности:
+{error_text}
+
+At {now_iso()}
+""",
+                    ),
+                },
+            )
+            print(f"Returned to Brief Ready: Veo could not animate {failed_frame}.")
+            return
+
         update_airtable_record(
             record_id,
             {
@@ -1859,7 +1901,7 @@ Generated at:
 Reel Motion Mode failed.
 
 Error:
-{repr(exc)}
+{error_text}
 
 Failed at:
 {now_iso()}
