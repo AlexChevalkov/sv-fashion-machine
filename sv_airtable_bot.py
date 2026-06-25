@@ -1,8 +1,10 @@
 import os
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import quote, urlparse, urljoin
+
+import time
 
 import feedparser
 import requests
@@ -204,6 +206,10 @@ def source_role(url: str) -> str:
     return "other_source"
 
 
+HISTORY_DAYS = 120
+MAX_HISTORY_PAGES = 20
+
+
 def fetch_existing_content() -> tuple[set[str], set[str], list[str]]:
     existing_urls = set()
     existing_titles = set()
@@ -218,14 +224,21 @@ def fetch_existing_content() -> tuple[set[str], set[str], list[str]]:
 
     headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
+    # Filter to last HISTORY_DAYS days so the query stays fast as the base grows.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).strftime("%Y-%m-%d")
+    date_filter = f"IS_AFTER(CREATED_TIME(), '{cutoff}')"
+
     offset = None
     pages = 0
 
-    while pages < 3:
+    while pages < MAX_HISTORY_PAGES:
         params = [
             ("pageSize", "100"),
             ("fields[]", "Title"),
             ("fields[]", "Source URL"),
+            ("filterByFormula", date_filter),
+            ("sort[0][field]", "Created"),
+            ("sort[0][direction]", "desc"),
         ]
 
         if offset:
@@ -259,8 +272,8 @@ def fetch_existing_content() -> tuple[set[str], set[str], list[str]]:
         if not offset:
             break
 
-    print(f"Existing Airtable titles: {len(existing_titles)}")
-    print(f"Existing Airtable URLs: {len(existing_urls)}")
+    print(f"Existing Airtable titles (last {HISTORY_DAYS} days): {len(existing_titles)}")
+    print(f"Existing Airtable URLs (last {HISTORY_DAYS} days): {len(existing_urls)}")
 
     return existing_urls, existing_titles, recent_titles[:50]
 
@@ -309,11 +322,151 @@ def is_probably_article_link(url: str, title: str) -> bool:
     return True
 
 
-def fetch_page_articles() -> list[dict]:
+SOURCES_TABLE_NAME = os.environ.get("AIRTABLE_SOURCES_TABLE_NAME", "Sources")
+EVERGREEN_TABLE_NAME = os.environ.get("AIRTABLE_EVERGREEN_TABLE_NAME", "Evergreen Ideas")
+
+
+def fetch_sources_from_airtable():
+    """
+    Read active sources from the Airtable 'Sources' table.
+    Returns (rss_feeds, source_pages) or None if it can't be read, so callers
+    fall back to the built-in lists.
+    """
+    if not (AIRTABLE_API_KEY and AIRTABLE_BASE_ID):
+        return None
+
+    table_encoded = quote(SOURCES_TABLE_NAME, safe="")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+
+    rss_feeds = []
+    source_pages = []
+    offset = None
+
+    try:
+        while True:
+            params = [("pageSize", "100")]
+            if offset:
+                params.append(("offset", offset))
+
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code != 200:
+                print("Sources table read failed:", response.status_code, response.text[:300])
+                return None
+
+            data = response.json()
+            for record in data.get("records", []):
+                fields = record.get("fields", {})
+                if not fields.get("Active1"):
+                    continue
+
+                source_url = (fields.get("Source URL") or "").strip()
+                source_name = (fields.get("Source Name") or source_url).strip()
+                fetch_type = (fields.get("Fetch Type") or "").strip().lower()
+
+                if not source_url:
+                    continue
+
+                if fetch_type == "rss":
+                    rss_feeds.append(source_url)
+                elif fetch_type in ("page", "press page"):
+                    source_pages.append({"name": source_name, "url": source_url})
+                # youtube / instagram / manual are skipped for now
+
+            offset = data.get("offset")
+            if not offset:
+                break
+
+        print(f"Sources from Airtable: {len(rss_feeds)} RSS, {len(source_pages)} pages")
+        return rss_feeds, source_pages
+
+    except Exception as error:
+        print("Sources table read error:", error)
+        return None
+
+
+def fetch_evergreen_from_airtable():
+    """
+    Read evergreen ideas whose Status is not 'Used' or 'Archive' from the
+    Airtable 'Evergreen Ideas' table. Returns a list of
+    {title, angle, record_id}, or None if it can't be read.
+    """
+    if not (AIRTABLE_API_KEY and AIRTABLE_BASE_ID):
+        return None
+
+    table_encoded = quote(EVERGREEN_TABLE_NAME, safe="")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+
+    items = []
+    offset = None
+
+    try:
+        while True:
+            params = [("pageSize", "100")]
+            if offset:
+                params.append(("offset", offset))
+
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code != 200:
+                print("Evergreen table read failed:", response.status_code, response.text[:300])
+                return None
+
+            data = response.json()
+            for record in data.get("records", []):
+                fields = record.get("fields", {})
+                status = (fields.get("Status") or "").strip().lower()
+                if status in ("used", "archive"):
+                    continue
+
+                title = (fields.get("Idea Title") or "").strip()
+                angle = (fields.get("Draft Angle") or "").strip()
+                if not title:
+                    continue
+
+                items.append({"title": title, "angle": angle, "record_id": record["id"]})
+
+            offset = data.get("offset")
+            if not offset:
+                break
+
+        print(f"Evergreen from Airtable: {len(items)} unused ideas")
+        return items
+
+    except Exception as error:
+        print("Evergreen table read error:", error)
+        return None
+
+
+def mark_evergreen_used(record_id: str) -> None:
+    """Set an evergreen idea's Status to 'Used' so it rotates out."""
+    if not (AIRTABLE_API_KEY and AIRTABLE_BASE_ID and record_id):
+        return
+
+    table_encoded = quote(EVERGREEN_TABLE_NAME, safe="")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}/{record_id}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.patch(
+            url,
+            headers=headers,
+            json={"fields": {"Status": "Used"}, "typecast": True},
+            timeout=30,
+        )
+        print("Mark evergreen Used:", response.status_code, response.text[:200])
+    except Exception as error:
+        print("Mark evergreen error:", error)
+
+
+def fetch_page_articles(source_pages: list[dict]) -> list[dict]:
     page_articles = []
     headers = {"User-Agent": "Mozilla/5.0 SVFashionBot/2.0"}
 
-    for source in SOURCE_PAGES:
+    for source in source_pages:
         source_name = source["name"]
         page_url = source["url"]
 
@@ -357,13 +510,23 @@ def fetch_page_articles() -> list[dict]:
         except Exception as error:
             print(f"Page source error for {source_name}: {error}")
 
+        time.sleep(0.5)
+
     return page_articles
 
 
 def fetch_articles() -> list[dict]:
     articles = []
 
-    for feed_url in RSS_FEEDS:
+    sources = fetch_sources_from_airtable()
+    if sources is not None and (sources[0] or sources[1]):
+        rss_feeds, source_pages = sources
+        print("Using sources from the Airtable Sources table.")
+    else:
+        rss_feeds, source_pages = RSS_FEEDS, SOURCE_PAGES
+        print("Airtable Sources unavailable — using built-in fallback sources.")
+
+    for feed_url in rss_feeds:
         try:
             feed = feedparser.parse(feed_url)
             source_name = feed.feed.get("title", feed_url)
@@ -389,7 +552,7 @@ def fetch_articles() -> list[dict]:
         except Exception as error:
             print(f"RSS error for {feed_url}: {error}")
 
-    articles.extend(fetch_page_articles())
+    articles.extend(fetch_page_articles(source_pages))
 
     seen = set()
     unique_articles = []
@@ -431,9 +594,19 @@ def filter_new_articles(
 
 
 def filter_unused_evergreen(existing_titles: set[str]) -> list[dict]:
-    unused = []
+    table_ideas = fetch_evergreen_from_airtable()
 
-    for item in EVERGREEN_IDEAS:
+    if table_ideas:
+        source_ideas = table_ideas
+    else:
+        # Fallback to the built-in list if the Airtable table can't be read.
+        source_ideas = [
+            {"title": item["title"], "angle": item["angle"], "record_id": ""}
+            for item in EVERGREEN_IDEAS
+        ]
+
+    unused = []
+    for item in source_ideas:
         if normalize_title(item["title"]) not in existing_titles:
             unused.append(item)
 
@@ -637,6 +810,7 @@ def build_selected_context(
             "summary": item["angle"],
             "source": "Evergreen Ideas",
             "link": "",
+            "evergreen_record_id": item.get("record_id", ""),
             "editorial_angle": selection.get("editorial_angle", ""),
             "selected_reason": selection.get("selected_reason", ""),
             "why_follow": selection.get("why_follow_this_account", ""),
@@ -803,10 +977,17 @@ def main() -> None:
 
     card = generate_card(selected_context)
 
+    # Tag the card so Content Inbox can show it came from the bot.
+    card["source"] = "Bot"
+
     print("\n=== Generated card ===")
     print(json.dumps(card, ensure_ascii=False, indent=2))
 
     send_to_airtable_webhook(card)
+
+    # If an evergreen idea was used, mark it 'Used' so it rotates out next time.
+    if selected_context.get("type") == "evergreen":
+        mark_evergreen_used(selected_context.get("evergreen_record_id", ""))
 
     print("Done. Card sent to Airtable Alex Review.")
 
