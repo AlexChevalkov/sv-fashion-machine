@@ -809,7 +809,12 @@ def poll_krea_job(job_id: str) -> str:
             return urls[0]
 
         if status in {"failed", "error", "cancelled", "canceled"}:
-            raise RuntimeError(f"Krea job failed: {job_id} | status={status}")
+            err = data.get("error") or {}
+            err_code = err.get("code", "")
+            err_msg = err.get("message", "")
+            raise RuntimeError(
+                f"Krea job failed: {job_id} | status={status} | {err_code}: {err_msg}"
+            )
 
         time.sleep(sleep_seconds)
 
@@ -1345,6 +1350,39 @@ Generated at:
     except Exception as exc:
         print("Reel Keyframes Mode failed:", repr(exc))
 
+        error_text = repr(exc)
+
+        # Krea content-moderation rejection is an expected, user-fixable case:
+        # return the record to the prompt-review gate (Brief Ready) with a clear
+        # note instead of a dead 'Failed', and do not crash the run.
+        if "content_policy" in error_text.lower():
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_BRIEF_READY,
+                    "Render Notes": append_note(
+                        existing_notes,
+                        f"""
+Krea отклонил один из кадров по своей модерации (content policy).
+
+Что делать:
+1. Откройте поле Reel Keyframe Prompts.
+2. Смягчите промпт проблемного кадра — уберите обнажённость, тело,
+   эротические и другие чувствительные формулировки; переведите идею
+   в одежду / ткань / архивную деталь / абстракцию.
+3. Снова поставьте статус Prompts Approved, чтобы перегенерировать кадры.
+
+Подробности ошибки:
+{error_text}
+
+At {now_iso()}
+""",
+                    ),
+                },
+            )
+            print("Returned to Brief Ready for prompt revision (content policy).")
+            return
+
         update_airtable_record(
             record_id,
             {
@@ -1355,7 +1393,7 @@ Generated at:
 Reel Keyframes Mode failed.
 
 Error:
-{repr(exc)}
+{error_text}
 
 Failed at:
 {now_iso()}
