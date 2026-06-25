@@ -1755,13 +1755,28 @@ Hard rules:
             print("Motion prompt:")
             print(prompt)
 
-            job_id = create_krea_video_job(
-                start_image_url=start_image_url,
-                prompt=prompt,
-                duration=8,
-            )
-
-            video_url = poll_krea_video_job(job_id)
+            # Veo can occasionally fail a job with a transient 'internal' error.
+            # Retry a few times; do NOT retry on a content/moderation rejection.
+            job_id = None
+            video_url = None
+            video_attempts = 3
+            for video_attempt in range(1, video_attempts + 1):
+                try:
+                    job_id = create_krea_video_job(
+                        start_image_url=start_image_url,
+                        prompt=prompt,
+                        duration=8,
+                    )
+                    video_url = poll_krea_video_job(job_id)
+                    break
+                except RuntimeError as video_exc:
+                    msg = str(video_exc).lower()
+                    if "content_policy" in msg or "moderation" in msg or "safety" in msg:
+                        raise
+                    print(f"Video clip attempt {video_attempt}/{video_attempts} failed: {video_exc}")
+                    if video_attempt >= video_attempts:
+                        raise
+                    time.sleep(20 * video_attempt)
 
             local_path = download_reel_video(
                 video_url=video_url,
