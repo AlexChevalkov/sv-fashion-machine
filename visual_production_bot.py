@@ -2178,12 +2178,17 @@ def split_overlay_text_blocks(raw_text: str) -> List[str]:
     if not raw_text:
         return []
 
-    # Main separator: ---
+    # Pick the separator, most explicit first:
+    #   1) lines of --- , 2) blank lines, 3) single newlines (one phrase per
+    #   line), 4) legacy " / " separator when everything is on one line.
     if re.search(r"(?m)^\s*-{3,}\s*$", raw_text):
         chunks = re.split(r"(?m)^\s*-{3,}\s*$", raw_text)
-    else:
-        # Fallback: empty line separates text blocks.
+    elif re.search(r"\n\s*\n", raw_text):
         chunks = re.split(r"\n\s*\n", raw_text)
+    elif "\n" in raw_text:
+        chunks = raw_text.split("\n")
+    else:
+        chunks = re.split(r"\s+/\s+", raw_text)
 
     blocks: List[str] = []
 
@@ -2199,6 +2204,15 @@ def split_overlay_text_blocks(raw_text: str) -> List[str]:
             # Remove bullets and numbering.
             line = re.sub(r"^\s*[-•*]\s*", "", line)
             line = re.sub(r"^\s*(?:Overlay\s*)?\d+\s*[:.)-]\s*", "", line, flags=re.I)
+            # Remove scene/slide labels like "Сцена 1:", "Scene 2 -", "Слайд 3.".
+            line = re.sub(
+                r"^\s*(?:scene|shot|slide|сцена|кадр|слайд)\s*\d+\s*[:.)-]\s*",
+                "",
+                line,
+                flags=re.I,
+            )
+            # Strip surrounding quotes / guillemets.
+            line = line.strip("«»\"'“”‘’").strip()
 
             if line:
                 lines.append(line)
@@ -2584,13 +2598,16 @@ def process_reel_text_overlay_record(record: Dict[str, Any]) -> None:
 
         overlay_texts = collect_overlay_texts(fields)
 
+        if not overlay_texts:
+            overlay_texts = ["EDITORIAL NOTE"]
+
         if len(overlay_texts) > expected_overlay_count:
             overlay_texts = overlay_texts[:expected_overlay_count]
 
-        if len(overlay_texts) < expected_overlay_count:
-            raise RuntimeError(
-                f"Not enough overlay texts. Got {len(overlay_texts)}, expected {expected_overlay_count}."
-            )
+        # If there are fewer overlay phrases than clips, reuse the last one so
+        # every clip still gets a caption instead of failing the whole render.
+        while len(overlay_texts) < expected_overlay_count:
+            overlay_texts.append(overlay_texts[-1])
 
         print("Overlay texts:")
         for idx, text in enumerate(overlay_texts, start=1):
