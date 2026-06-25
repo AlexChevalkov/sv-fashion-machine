@@ -267,6 +267,7 @@ Source URL:
 - Если нужна идея montage, перепиши её как один still: arranged textile details in one controlled composition.
 - Reel Motion Prompts — отдельное поле для motion/video-сцен. Там можно использовать pan, zoom, transition, rhythm edit.
 - Reel Motion Prompts должен содержать РОВНО {keyframe_count} блоков — по одному motion-промпту на каждый keyframe.
+- On-screen Text: РОВНО {keyframe_count} коротких фраз, КАЖДАЯ С НОВОЙ СТРОКИ (по одной на кадр). Только сам текст фразы — БЕЗ подписей «Сцена 1:», «Сцена 2:» и т.п., без кавычек «», без разделителя « / », без нумерации. Просто чистый текст, по строке на сцену.
 - Selected Keyframe Scenes должен перечислять номера всех {keyframe_count} кадров по порядку через запятую (например 1,2,3).
 - Нельзя использовать Krea Prompt Pack как источник готовых keyframes. Krea Prompt Pack — только общий human-readable summary.
 - Generated Carousel Prompts должен содержать РОВНО столько отдельных промптов, сколько указано в Slide Count.
@@ -301,7 +302,7 @@ Source URL:
   "Reel Duration": "30 sec",
   "Reel Script": "voiceover script для рилса",
   "Shot List": "покадровый план: сцена 1, сцена 2, сцена 3...",
-  "On-screen Text": "короткий текст на экране по сценам",
+  "On-screen Text": "ровно {keyframe_count} коротких фраз, каждая с новой строки, по одной на сцену/кадр. Только текст фразы, без подписей 'Сцена N', без кавычек, без нумерации",
   "Carousel Cover": "текст обложки карусели",
   "Slide Count": 7,
   "Slide Structure": "структура слайдов 1-7",
