@@ -528,7 +528,7 @@ def parse_slide_copy_for_generation(
 
         value = re.sub(r"\s+", " ", value).strip()
         value = value.strip()
-        value = value.strip("|").strip()
+        value = value.strip("|/").strip()
         value = value.strip("«»\"'“”‘’").strip()
 
         value = re.sub(
@@ -546,7 +546,7 @@ def parse_slide_copy_for_generation(
     if raw:
         marker_pattern = re.compile(
             r"(?i)"
-            r"(?:^|\n|\s*\|\s*)"
+            r"(?:^|\n|\s*[|/]\s*)"
             r"(?:slide|слайд)\s*(\d+)\s*[:：.)-]\s*"
         )
 
@@ -572,7 +572,7 @@ def parse_slide_copy_for_generation(
         else:
             parts = [
                 clean_text(part)
-                for part in re.split(r"\n+|\s+\|\s+", raw)
+                for part in re.split(r"\n+|\s+[|/]\s+", raw)
                 if clean_text(part)
             ]
 
@@ -3600,7 +3600,9 @@ def process_record(record: Dict[str, Any]) -> None:
                     download_image(raw_url, raw_path)
 
                     source = Image.open(raw_path)
-                    source = fit_cover_image_to_canvas(source)
+                    # Carousel is 4:5 (1080x1350). Without explicit size this
+                    # defaults to 9:16 and distorts the slide.
+                    source = fit_cover_image_to_canvas(source, width=CANVAS_W, height=CANVAS_H)
 
                     result = add_text_overlay(
                         source,
