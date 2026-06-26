@@ -262,6 +262,7 @@ Source URL:
 - Последний keyframe (номер {keyframe_count}) = final / conclusion frame.
 - Промежуточные keyframes = развитие визуального аргумента (conflict, деталь, контраст).
 - Keyframes должны идти логичной последовательностью от hook к final.
+- ВСЕ keyframes (включая финальный) должны быть ФОТОГРАФИЧЕСКИМИ editorial-сценами, пригодными для оживления в видео. НЕ делай кадр чисто типографической карточкой (текст на пустом/чёрном фоне) — image-to-video такие не оживляет. Закрывающую мысль бот добавит сам как overlay-текст, поэтому внутри картинки текст не нужен.
 - В Reel Keyframe Prompts запрещены слова и логика: montage, fast cut, sequence, storyboard, split-screen, slow pan, zoom-in, transition, motion, video.
 - В Reel Keyframe Prompts и Krea Prompt Pack избегай формулировок, которые рубит AI-модерация: обнажённость, эротика, явное/голое тело, nude, naked, bare torso, underwear, провокация. Даже если тема архива связана с телом — переводи идею в одежду, ткань, силуэт, фактуру, архивную деталь, абстракцию. Кадры должны быть editorial и безопасными для генерации.
 - Если нужна идея split-screen, перепиши её как один still: comparative flat lay, two objects side by side, controlled editorial composition.
@@ -271,6 +272,7 @@ Source URL:
 - On-screen Text: РОВНО {keyframe_count} коротких фраз, КАЖДАЯ С НОВОЙ СТРОКИ (по одной на кадр). Только сам текст фразы — БЕЗ подписей «Сцена 1:», «Сцена 2:» и т.п., без кавычек «», без разделителя « / », без нумерации. Просто чистый текст, по строке на сцену.
 - Selected Keyframe Scenes должен перечислять номера всех {keyframe_count} кадров по порядку через запятую (например 1,2,3).
 - Нельзя использовать Krea Prompt Pack как источник готовых keyframes. Krea Prompt Pack — только общий human-readable summary.
+- Slide Copy: ровно Slide Count коротких фраз, КАЖДАЯ С НОВОЙ СТРОКИ (по одной на слайд, в порядке слайдов). Только текст фразы — БЕЗ подписей «Слайд 1:», «Слайд 2:» и т.п., без кавычек «», без разделителя « / », без нумерации. Первая строка = текст обложки (слайд 1).
 - Generated Carousel Prompts должен содержать РОВНО столько отдельных промптов, сколько указано в Slide Count.
 - Каждый prompt = только ОДНА картинка для ОДНОГО слайда.
 - Нельзя писать в одном prompt: Cover image + Slide 2 + Slide 3 + Slide 4.
@@ -307,7 +309,7 @@ Source URL:
   "Carousel Cover": "текст обложки карусели",
   "Slide Count": 7,
   "Slide Structure": "структура слайдов 1-7",
-  "Slide Copy": "готовый короткий текст для каждого слайда",
+  "Slide Copy": "по одной короткой фразе на слайд, каждая с новой строки, ровно Slide Count строк. Первая строка = текст обложки. Без подписей 'Слайд N', без кавычек, без ' / ', без нумерации — только текст",
   "Krea Prompt Pack": "детальный prompt pack: cover image, carousel images, reel scenes, style rules, negative prompts",
   "Reel Keyframe Prompts": "ровно {keyframe_count} отдельных still image prompts для keyframes рилса (от hook через развитие к final). Каждый prompt описывает одну неподвижную 9:16 картинку, без motion language, без montage, без split-screen, без storyboard. Разделитель между prompt-блоками строго: пустая строка + --- + пустая строка",
   "Reel Motion Prompts": "отдельные video prompts для motion-сцен рилса. Здесь можно использовать slow zoom, pan, transition, rhythm edit. Разделитель между сценами строго: пустая строка + --- + пустая строка",
