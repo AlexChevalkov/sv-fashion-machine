@@ -957,6 +957,10 @@ def send_to_airtable_webhook(card: dict) -> None:
 
 def main() -> None:
     print("SV Airtable Bot started:", datetime.now(timezone.utc).isoformat())
+    webhook_info = urlparse(AIRTABLE_WEBHOOK_URL)
+    print("Webhook host:", webhook_info.netloc)
+    print("Airtable base id:", AIRTABLE_BASE_ID[:8] + "..." if AIRTABLE_BASE_ID else "missing")
+    print("Airtable table name:", AIRTABLE_TABLE_NAME or "missing")
 
     existing_urls, existing_titles, recent_titles = fetch_existing_content()
 
