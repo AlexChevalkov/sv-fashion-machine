@@ -3,7 +3,8 @@ name: SV Airtable Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 8,13,18 * * *"
+    - cron: "17 8,16,20 * * *"
+      timezone: "Asia/Jerusalem"
 
 jobs:
   sv-airtable-bot:
