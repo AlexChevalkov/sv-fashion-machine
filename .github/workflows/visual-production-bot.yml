@@ -3,7 +3,7 @@ name: Visual Production Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "20,50 * * * *"
+    - cron: "22,52 * * * *"
 
 jobs:
   visual-production-bot:
