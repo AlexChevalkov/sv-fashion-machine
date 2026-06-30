@@ -3,7 +3,7 @@ name: Visual Brief Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10,40 * * * *"
+    - cron: "13,43 * * * *"
 
 jobs:
   visual-brief-bot:
