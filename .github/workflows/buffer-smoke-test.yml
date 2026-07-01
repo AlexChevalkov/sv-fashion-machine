@@ -52,7 +52,7 @@ jobs:
               "saveToDraft": True,
               "text": "SMOKE TEST draft — please delete",
               "assets": [
-                {"image": {"url": "https://picsum.photos/1080/1080", "metadata": {"altText": "smoke test"}}}
+                {"image": {"url": "https://placehold.co/1080x1080.png", "metadata": {"altText": "smoke test"}}}
               ],
               "metadata": {"instagram": {"type": "post", "shouldShareToFeed": True}},
             }
