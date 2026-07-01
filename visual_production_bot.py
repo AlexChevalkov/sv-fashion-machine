@@ -15,6 +15,7 @@ import anthropic
 from PIL import Image, ImageDraw, ImageFont
 
 from r2_storage import r2_is_configured, upload_file_to_r2
+from buffer_publish import buffer_is_configured, create_instagram_draft
 
 
 # =========================================================
@@ -3339,6 +3340,57 @@ Failed at:
         )
 
         raise 
+def pick_post_caption(fields: Dict[str, Any]) -> str:
+    """Best available caption for the Buffer post."""
+    for key in ("Final Reel Caption", "Source Final Caption", "Final Caption"):
+        value = safe_get(fields, key, "")
+        if value and value.strip():
+            return value.strip()
+    return safe_get(fields, "Job Title", "") or ""
+
+
+def publish_draft_to_buffer(
+    record_id: str,
+    is_reel: bool,
+    caption: str,
+    video_local_path: str = "",
+    image_local_paths: Any = None,
+):
+    """
+    Upload the final media to R2 (permanent public URL) and create an
+    Instagram DRAFT in Buffer. Returns (ok: bool, info: str). Never raises,
+    so a Buffer/R2 problem can never break the production pipeline.
+    """
+    try:
+        if not buffer_is_configured():
+            return False, "Buffer not configured (no BUFFER_ACCESS_TOKEN)."
+
+        if is_reel:
+            video_url = mirror_to_r2(
+                video_local_path,
+                f"bot-output/{record_id}/final/final_reel.mp4",
+                "",
+            )
+            if not video_url:
+                return False, "R2 upload failed for reel video (no public URL)."
+            return create_instagram_draft(caption=caption, video_url=video_url)
+
+        image_urls = []
+        for index, local_path in enumerate(image_local_paths or [], start=1):
+            url = mirror_to_r2(
+                local_path,
+                f"bot-output/{record_id}/final/slide_{index:02d}.png",
+                "",
+            )
+            if url:
+                image_urls.append(url)
+        if not image_urls:
+            return False, "R2 upload failed for carousel slides (no public URLs)."
+        return create_instagram_draft(caption=caption, image_urls=image_urls)
+    except Exception as exc:
+        return False, f"Buffer publish exception: {exc!r}"
+
+
 def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
     record_id = record["id"]
 
@@ -3377,21 +3429,49 @@ def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
             fields = current_record.get("fields", {})
             output_links = safe_get(fields, "Output Links", "")
 
+        # Finalize: no separate text-review gate, no sound. Take the caption
+        # (reviewed earlier at the Brief Ready gate; generated here as a
+        # fallback), then push a DRAFT to Buffer. Buffer/R2 failure is
+        # non-fatal — we fall back to "Ready for Buffer" for manual posting.
+        current_record = fetch_airtable_record(record_id)
+        fields = current_record.get("fields", {})
+
+        caption = pick_post_caption(fields)
+        if not caption:
+            try:
+                caption = generate_final_reel_caption(current_record)["final_reel_caption"]
+            except Exception as caption_error:
+                print("Caption generation failed, using title:", repr(caption_error))
+                caption = safe_get(fields, "Job Title", "")
+
+        ok, info = publish_draft_to_buffer(
+            record_id,
+            is_reel=True,
+            caption=caption,
+            video_local_path="outputs/final_reel_text_v1.mp4",
+        )
+        print("Buffer publish result:", ok, info)
+
+        if ok:
+            final_status = "Sent for Buffer"
+            buffer_note = f"Buffer draft created automatically. {info}"
+        else:
+            final_status = STATUS_READY_FOR_BUFFER
+            buffer_note = f"Buffer draft NOT created ({info}). Post manually from the output."
+
         update_airtable_record(
             record_id,
             {
-                "Visual Status": STATUS_NEEDS_TEXT_REVIEW,
+                "Visual Status": final_status,
+                "Final Reel Caption": caption,
                 "Render Notes": append_note(
                     existing_notes,
                     f"""
-Auto pipeline after visual approval completed.
+Auto pipeline after visual approval completed (motion, assembly, on-screen text).
+No sound (by design — own rights-cleared audio is added in Instagram).
+{buffer_note}
 
-Motion clips checked.
-Final reel assembly checked.
-Text preview generated or checked.
-
-Status moved to Needs Text Review.
-
+Status moved to {final_status}.
 Generated at:
 {now_iso()}
 """,
@@ -3399,7 +3479,7 @@ Generated at:
             },
         )
 
-        print("Reel Approved Visual pipeline completed. Moved to Needs Text Review.")
+        print("Reel finalize complete. Status:", final_status)
 
     except Exception as error:
         print("Auto visual approval pipeline failed:", repr(error))
@@ -3630,16 +3710,35 @@ def process_record(record: Dict[str, Any]) -> None:
                 else:
                     render_notes = production_note
 
+                # Finalize carousel: upload assembled slides to R2 and push a
+                # DRAFT to Buffer (no separate text-review gate). Non-fatal on
+                # failure — fall back to "Ready for Buffer" for manual posting.
+                caption = pick_post_caption(fields)
+                ok, info = publish_draft_to_buffer(
+                    record_id,
+                    is_reel=False,
+                    caption=caption,
+                    image_local_paths=assembled_paths,
+                )
+                print("Buffer publish result:", ok, info)
+
+                if ok:
+                    final_status = "Sent for Buffer"
+                    buffer_note = f"Buffer draft created automatically. {info}"
+                else:
+                    final_status = STATUS_READY_FOR_BUFFER
+                    buffer_note = f"Buffer draft NOT created ({info}). Post manually from the output."
+
                 update_airtable_record(
                     record_id,
                     {
-                        "Visual Status": STATUS_NEEDS_TEXT_REVIEW,
+                        "Visual Status": final_status,
                         "Output Links": output_links,
-                        "Render Notes": render_notes,
+                        "Render Notes": render_notes + "\n\n" + buffer_note,
                     },
                 )
 
-                print("Carousel overlays assembled. Moved to Needs Text Review.")
+                print("Carousel finalize complete. Status:", final_status)
                 return
 
             except Exception as error:
