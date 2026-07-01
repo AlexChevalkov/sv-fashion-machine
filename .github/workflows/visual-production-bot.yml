@@ -51,6 +51,8 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_CHANNEL_ID: "6a2481eac687a22dd46ad06c"
           GITHUB_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
