@@ -1,0 +1,71 @@
+name: Buffer Smoke Test
+
+# Temporary workflow to validate that BUFFER_ACCESS_TOKEN can create an
+# Instagram draft via Buffer's GraphQL API. Delete after validation.
+on:
+  workflow_dispatch:
+
+jobs:
+  buffer-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Create a test draft in Buffer
+        env:
+          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          BUFFER_CHANNEL_ID: "6a2481eac687a22dd46ad06c"
+        run: |
+          python - <<'PY'
+          import os, json, requests
+
+          token = os.environ["BUFFER_ACCESS_TOKEN"]
+          channel = os.environ["BUFFER_CHANNEL_ID"]
+
+          mutation = """
+          mutation CreateDraft($input: CreatePostInput!) {
+            createPost(input: $input) {
+              __typename
+              ... on PostActionSuccess { post { id status channelId text } }
+              ... on InvalidInputError { message }
+              ... on UnauthorizedError { message }
+              ... on NotFoundError { message }
+              ... on UnexpectedError { message }
+              ... on RestProxyError { message code }
+              ... on LimitReachedError { message }
+            }
+          }
+          """
+
+          variables = {
+            "input": {
+              "channelId": channel,
+              "schedulingType": "notification",
+              "mode": "addToQueue",
+              "saveToDraft": True,
+              "text": "SMOKE TEST draft — please delete",
+              "assets": [
+                {"image": {"url": "https://picsum.photos/1080/1080", "metadata": {"altText": "smoke test"}}}
+              ],
+              "metadata": {"instagram": {"type": "post", "shouldShareToFeed": True}},
+            }
+          }
+
+          endpoint = "https://graphql.buffer.com"
+          headers = {
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+          }
+
+          print("POST", endpoint)
+          resp = requests.post(endpoint, json={"query": mutation, "variables": variables}, headers=headers, timeout=60)
+          print("HTTP status:", resp.status_code)
+          print("Response body:")
+          print(resp.text[:3000])
+          PY
