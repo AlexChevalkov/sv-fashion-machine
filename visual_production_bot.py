@@ -2437,9 +2437,14 @@ def add_on_screen_text_to_reel(
     text_files = []
 
     for idx, text in enumerate(overlay_texts, start=1):
+        # Wrap long phrases onto 2–3 lines so the text never runs off the
+        # frame. The wrapped version is stored back so the font-size chooser
+        # below measures the real (wrapped) longest line.
+        wrapped_text = wrap_overlay_text(text, width=26, max_lines=3)
+        overlay_texts[idx - 1] = wrapped_text
         text_files.append(
             write_drawtext_file(
-                text=text,
+                text=wrapped_text,
                 filename=f"onscreen_text_{idx:02d}.txt",
             )
         )
