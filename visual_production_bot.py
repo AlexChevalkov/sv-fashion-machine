@@ -2175,7 +2175,7 @@ def clean_overlay_line(line: str) -> str:
     return line
 
 
-def wrap_overlay_text(text: str, width: int = 30, max_lines: int = 2) -> str:
+def wrap_overlay_text(text: str, width: int = 30, max_lines=2) -> str:
     text = clean_overlay_line(text)
 
     if not text:
@@ -2188,7 +2188,9 @@ def wrap_overlay_text(text: str, width: int = 30, max_lines: int = 2) -> str:
         replace_whitespace=False,
     )
 
-    wrapped = wrapped[:max_lines]
+    # max_lines=None (or 0) means no limit — keep every wrapped line.
+    if max_lines:
+        wrapped = wrapped[:max_lines]
 
     return "\n".join(wrapped)
 
@@ -2437,10 +2439,10 @@ def add_on_screen_text_to_reel(
     text_files = []
 
     for idx, text in enumerate(overlay_texts, start=1):
-        # Wrap long phrases onto 2–3 lines so the text never runs off the
-        # frame. The wrapped version is stored back so the font-size chooser
-        # below measures the real (wrapped) longest line.
-        wrapped_text = wrap_overlay_text(text, width=26, max_lines=3)
+        # Wrap long phrases so the text never runs off the frame — no line
+        # limit, keep as many lines as needed. The wrapped version is stored
+        # back so the font-size chooser below measures the real longest line.
+        wrapped_text = wrap_overlay_text(text, width=26, max_lines=None)
         overlay_texts[idx - 1] = wrapped_text
         text_files.append(
             write_drawtext_file(
