@@ -12,6 +12,11 @@ AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 CONTENT_TABLE_NAME = os.environ.get("AIRTABLE_TABLE_NAME", "Content Inbox")
 VISUAL_TABLE_NAME = os.environ.get("AIRTABLE_VISUAL_TABLE_NAME", "Visual Jobs")
 
+# Status set on the Content Inbox record once its topic has been taken into
+# work (a Visual Job was created). This also removes it from the "Approved"
+# queue so it is not fetched/processed again.
+TRANSFERRED_STATUS = os.environ.get("AIRTABLE_TRANSFERRED_STATUS", "Sent to Buffer")
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -221,6 +226,7 @@ def update_content_after_transfer(content_record_id: str, visual_job_id: str, co
     update_fields = {
         "Visual Job Created": True,
         "Visual Job ID": visual_job_id,
+        "Status": TRANSFERRED_STATUS,
     }
 
     url = f"{airtable_table_url(CONTENT_TABLE_NAME)}/{content_record_id}"
