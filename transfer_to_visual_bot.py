@@ -213,35 +213,32 @@ def create_visual_job(content_record: dict, visual_schema: dict) -> str:
 
 
 def update_content_after_transfer(content_record_id: str, visual_job_id: str, content_schema: dict) -> None:
-    update_fields = {}
-
-    if "Visual Job Created" in content_schema:
-        update_fields["Visual Job Created"] = True
-
-    if "Visual Job ID" in content_schema:
-        update_fields["Visual Job ID"] = visual_job_id
-
-    if not update_fields:
-        print("No transfer marker fields found in Content Inbox. Skipping content update.")
-        return
+    # Marker fields are written best-effort with typecast, so this does NOT
+    # depend on reading the table schema (schema reads can 403 if the Airtable
+    # token lacks schema.bases:read). Dedup no longer relies on these markers,
+    # so a failure here must not stop or fail the transfer — the card is
+    # already created. content_schema is kept for call-site compatibility.
+    update_fields = {
+        "Visual Job Created": True,
+        "Visual Job ID": visual_job_id,
+    }
 
     url = f"{airtable_table_url(CONTENT_TABLE_NAME)}/{content_record_id}"
 
-    response = requests.patch(
-        url,
-        headers=airtable_headers(),
-        json={
-            "fields": update_fields,
-            "typecast": True,
-        },
-        timeout=30,
-    )
-
-    print("Update Content Inbox status:", response.status_code)
-    print("Update Content Inbox preview:", response.text[:700])
-
-    if response.status_code not in [200, 201, 202]:
-        raise RuntimeError("Could not update Content Inbox after transfer")
+    try:
+        response = requests.patch(
+            url,
+            headers=airtable_headers(),
+            json={
+                "fields": update_fields,
+                "typecast": True,
+            },
+            timeout=30,
+        )
+        print("Update Content Inbox status:", response.status_code)
+        print("Update Content Inbox preview:", response.text[:700])
+    except requests.RequestException as exc:
+        print("Update Content Inbox skipped (network error):", exc)
 
 
 def main() -> None:
@@ -268,13 +265,13 @@ def main() -> None:
         print("Content:", title)
         print("Record:", content_id)
 
-        if fields.get("Visual Job Created") is True:
-            print("Skipped: Visual Job Created already checked.")
-            skipped_count += 1
-            continue
-
+        # Self-healing dedup: rely on the ACTUAL existence of a Visual Job
+        # (matched by Source Content ID), not on the "Visual Job Created"
+        # checkbox. If the card was deleted in Visual Jobs, the checkbox may
+        # still be ticked — we must re-create it, so we no longer skip on the
+        # checkbox alone.
         if visual_job_already_exists(content_id, title):
-            print("Skipped: Visual Job already exists.")
+            print("Skipped: Visual Job already exists in Visual Jobs.")
             skipped_count += 1
             continue
 
