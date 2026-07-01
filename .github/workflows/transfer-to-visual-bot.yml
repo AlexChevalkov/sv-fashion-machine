@@ -2,8 +2,9 @@ name: Transfer To Visual Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
+  # Запуск по расписанию перенесён во внешний сервис cron-job.org (надёжный триггер).
+  # Историческая логика: schedule "*/30 * * * *" — каждые 30 минут (в :00 и :30).
+  # Новое расписание задаётся в cron-job.org (Europe/Moscow), тот же интервал.
 
 jobs:
   transfer-to-visual:

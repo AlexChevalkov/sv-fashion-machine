@@ -2,9 +2,10 @@ name: SV Airtable Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 8,16,20 * * *"
-      timezone: "Asia/Jerusalem"
+  # Запуск по расписанию перенесён во внешний сервис cron-job.org (надёжный триггер).
+  # Историческая логика (была ненадёжна на GitHub; GitHub cron игнорирует timezone и шёл по UTC):
+  #   schedule: "17 8,16,20 * * *"  — 3 раза в сутки (задумано Asia/Jerusalem).
+  # Новое расписание: 3×/сутки по Europe/Moscow, задаётся в cron-job.org.
 
 jobs:
   sv-airtable-bot:

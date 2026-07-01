@@ -2,8 +2,16 @@ name: Visual Production Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "22,52 * * * *"
+  # Запуск по расписанию перенесён во внешний сервис cron-job.org (надёжный триггер).
+  # Историческая логика: schedule "22,52 * * * *" — каждые 30 минут (в :22 и :52),
+  # со сдвигом относительно других ботов, чтобы держать порядок конвейера в течение часа.
+  # Новое расписание задаётся в cron-job.org (Europe/Moscow), тот же интервал и сдвиг.
+
+# Защита от наложения запусков: у Krea лимит = 1 одновременная задача.
+# Один запуск Visual Production за раз; новый ждёт завершения предыдущего.
+concurrency:
+  group: visual-production
+  cancel-in-progress: false
 
 jobs:
   visual-production-bot:
