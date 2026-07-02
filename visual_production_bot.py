@@ -3441,14 +3441,57 @@ def publish_draft_to_buffer(
         return False, f"Buffer publish exception: {exc!r}"
 
 
-def parse_post_slides(fields: Dict[str, Any]) -> List[str]:
-    """Split the post text (Slide Copy) into slide blocks — one block per slide.
-    Prefers blank-line separated blocks; falls back to single lines."""
-    raw = safe_get(fields, "Slide Copy", "")
-    blocks = [b.strip() for b in re.split(r"\n\s*\n", raw) if b.strip()]
-    if len(blocks) < 2:
-        blocks = [b.strip() for b in str(raw).split("\n") if b.strip()]
-    return blocks
+def strip_trailing_hashtags(text: str) -> str:
+    """Drop the trailing hashtag block (and blank lines) from post text."""
+    lines = str(text or "").rstrip().split("\n")
+    while lines:
+        stripped = lines[-1].strip()
+        if stripped == "" or stripped.startswith("#"):
+            lines.pop()
+        else:
+            break
+    return "\n".join(lines).strip()
+
+
+def split_text_into_slides(full_text: str, min_slides: int = 3, max_slides: int = 7) -> List[str]:
+    """
+    Split the FULL post text into 3–7 slide blocks (the whole text, in parts —
+    NOT short key phrases). Uses the author's paragraphs as natural break
+    points; merges adjacent paragraphs by length when there are too many.
+    """
+    text = strip_trailing_hashtags(full_text)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+    if not paragraphs:
+        return [text.strip()] if text.strip() else []
+
+    # Too few paragraphs but long text: split the longest ones by sentences.
+    while len(paragraphs) < min_slides and any(len(p) > 200 for p in paragraphs):
+        longest_i = max(range(len(paragraphs)), key=lambda i: len(paragraphs[i]))
+        sentences = re.split(r"(?<=[.!?])\s+", paragraphs[longest_i])
+        if len(sentences) < 2:
+            break
+        mid = len(sentences) // 2
+        paragraphs[longest_i:longest_i + 1] = [
+            " ".join(sentences[:mid]).strip(),
+            " ".join(sentences[mid:]).strip(),
+        ]
+
+    if len(paragraphs) <= max_slides:
+        return paragraphs
+
+    # Too many: greedily merge adjacent paragraphs into <= max_slides balanced groups.
+    target = sum(len(p) for p in paragraphs) / max_slides
+    groups, current, current_len = [], [], 0
+    for paragraph in paragraphs:
+        if current and current_len + len(paragraph) > target and len(groups) < max_slides - 1:
+            groups.append("\n\n".join(current))
+            current, current_len = [], 0
+        current.append(paragraph)
+        current_len += len(paragraph)
+    if current:
+        groups.append("\n\n".join(current))
+    return groups
 
 
 def render_post_slide(text: str, index: int, total: int, out_path: Path) -> None:
@@ -3465,12 +3508,21 @@ def render_post_slide(text: str, index: int, total: int, out_path: Path) -> None
     font_path = globals().get(
         "FONT_BOLD", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
     )
-    font = get_font(font_path, 52)
 
     max_width = CANVAS_W - 160
-    lines = wrap_text_lines(draw, text, font, max_width)
+    max_text_height = CANVAS_H - 300  # leave room for margins + counter
 
-    line_height = font.size + 18
+    # Auto-fit: shrink the font until the wrapped text fits the slide height.
+    font = get_font(font_path, 52)
+    lines = wrap_text_lines(draw, text, font, max_width)
+    line_height = int(font.size * 1.35)
+    for size in (52, 46, 42, 38, 34, 30, 26):
+        font = get_font(font_path, size)
+        lines = wrap_text_lines(draw, text, font, max_width)
+        line_height = int(size * 1.35)
+        if line_height * max(1, len(lines)) <= max_text_height:
+            break
+
     block_height = line_height * max(1, len(lines))
     y = (CANVAS_H - block_height) // 2
 
@@ -3509,13 +3561,10 @@ def process_post_record(record: Dict[str, Any]) -> None:
 
     update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
 
-    blocks = parse_post_slides(fields)
+    caption = pick_post_caption(fields)
+    blocks = split_text_into_slides(caption)
     if not blocks:
-        blocks = [
-            safe_get(fields, "Final Reel Caption")
-            or safe_get(fields, "Job Title")
-            or "SV FASHION MEDIA"
-        ]
+        blocks = [caption or safe_get(fields, "Job Title") or "SV FASHION MEDIA"]
 
     slide_dir = OUTPUT_DIR / record_id / "post"
     ensure_dir(slide_dir)
@@ -3526,8 +3575,6 @@ def process_post_record(record: Dict[str, Any]) -> None:
         render_post_slide(block, idx, len(blocks), out_path)
         slide_paths.append(str(out_path))
         print(f"Rendered post slide {idx}/{len(blocks)}")
-
-    caption = pick_post_caption(fields)
 
     ok, info = publish_draft_to_buffer(
         record_id,
