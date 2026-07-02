@@ -47,6 +47,23 @@ KREA_ASPECT_RATIO = "4:5"
 # Typography / rendering
 CANVAS_W = 1080
 CANVAS_H = 1350
+
+
+def _parse_rgb(value, default):
+    try:
+        parts = [int(x.strip()) for x in str(value).split(",")]
+        if len(parts) == 3 and all(0 <= p <= 255 for p in parts):
+            return tuple(parts)
+    except Exception:
+        pass
+    return default
+
+
+# Text-only "Post" slide styling (env-overridable so it's easy to retune later).
+POST_BG_COLOR = _parse_rgb(os.environ.get("POST_BG_COLOR"), (18, 35, 30))
+POST_TEXT_COLOR = _parse_rgb(os.environ.get("POST_TEXT_COLOR"), (255, 255, 255))
+POST_FONT_REGULAR = os.environ.get("POST_FONT_REGULAR", "fonts/Montserrat-Regular.ttf")
+POST_FONT_BOLD = os.environ.get("POST_FONT_BOLD", "fonts/Montserrat-Bold.ttf")
 MAX_SLIDES = 7
 MIN_SLIDES = 5
 
@@ -3494,55 +3511,82 @@ def split_text_into_slides(full_text: str, min_slides: int = 3, max_slides: int 
     return groups
 
 
-def render_post_slide(text: str, index: int, total: int, out_path: Path) -> None:
-    """
-    Render one text-only slide: solid colour background + centred text.
-    Placeholder design — colours/typography to be refined later.
-    """
-    background = (20, 20, 22)
-    text_color = (245, 245, 245)
+def load_post_font(bold: bool, size: int) -> ImageFont.FreeTypeFont:
+    """Load the Post font (Montserrat) with graceful fallback to DejaVu."""
+    path = POST_FONT_BOLD if bold else POST_FONT_REGULAR
+    for candidate in (
+        path,
+        globals().get("FONT_BOLD" if bold else "FONT_REGULAR", ""),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if not candidate:
+            continue
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
-    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), background)
+
+# Post slide layout (pixels on a 1080x1350 canvas).
+POST_MARGIN_X = 96      # left/right margin
+POST_MARGIN_TOP = 130
+POST_MARGIN_BOTTOM = 150
+
+
+def render_post_slide(text: str, index: int, total: int, out_path: Path, title: str = "") -> None:
+    """
+    Render one text-only Post slide: solid colour background, LEFT-aligned text.
+    Slide 1 (title provided) shows the title in UPPERCASE, one blank row, then text.
+    Font size auto-fits so the whole block fits the slide.
+    """
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), POST_BG_COLOR)
     draw = ImageDraw.Draw(canvas)
 
-    font_path = globals().get(
-        "FONT_BOLD", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
-    )
+    left = POST_MARGIN_X
+    max_width = CANVAS_W - 2 * POST_MARGIN_X
+    y = POST_MARGIN_TOP
 
-    max_width = CANVAS_W - 160
-    max_text_height = CANVAS_H - 300  # leave room for margins + counter
+    # Title on the first slide: uppercase, bold, then a blank row.
+    if title.strip():
+        title_font = load_post_font(bold=True, size=60)
+        title_line_h = int(60 * 1.18)
+        for line in wrap_text_lines(draw, title.strip().upper(), title_font, max_width):
+            draw.text((left, y), line, font=title_font, fill=POST_TEXT_COLOR)
+            y += title_line_h
+        y += title_line_h  # one blank row between title and text
 
-    # Auto-fit: shrink the font until the wrapped text fits the slide height.
-    font = get_font(font_path, 52)
-    lines = wrap_text_lines(draw, text, font, max_width)
-    line_height = int(font.size * 1.35)
-    for size in (52, 46, 42, 38, 34, 30, 26):
-        font = get_font(font_path, size)
-        lines = wrap_text_lines(draw, text, font, max_width)
-        line_height = int(size * 1.35)
-        if line_height * max(1, len(lines)) <= max_text_height:
+    available_h = CANVAS_H - y - POST_MARGIN_BOTTOM
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()] or [text]
+
+    # Auto-fit the body font so every paragraph fits the remaining height.
+    body_font = load_post_font(bold=False, size=27)
+    line_h = int(27 * 1.4)
+    para_gap = int(27 * 0.9)
+    wrapped_paragraphs = [wrap_text_lines(draw, p, body_font, max_width) for p in paragraphs]
+    for size in (46, 42, 38, 34, 30, 27):
+        body_font = load_post_font(bold=False, size=size)
+        line_h = int(size * 1.4)
+        para_gap = int(size * 0.9)
+        wrapped_paragraphs = [wrap_text_lines(draw, p, body_font, max_width) for p in paragraphs]
+        total_h = sum(line_h * len(wl) for wl in wrapped_paragraphs) + para_gap * (len(paragraphs) - 1)
+        if total_h <= available_h:
             break
 
-    block_height = line_height * max(1, len(lines))
-    y = (CANVAS_H - block_height) // 2
+    for wrapped in wrapped_paragraphs:
+        for line in wrapped:
+            draw.text((left, y), line, font=body_font, fill=POST_TEXT_COLOR)
+            y += line_h
+        y += para_gap
 
-    for line in lines:
-        line_width = draw.textlength(line, font=font)
-        x = (CANVAS_W - line_width) / 2
-        draw.text((x, y), line, font=font, fill=text_color)
-        y += line_height
-
-    counter_font = get_font(
-        globals().get("FONT_REGULAR", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
-        26,
-    )
-    counter = f"{index:02d}/{total:02d}"
-    counter_width = draw.textlength(counter, font=counter_font)
+    # Slide counter, bottom-left.
+    counter_font = load_post_font(bold=False, size=24)
     draw.text(
-        ((CANVAS_W - counter_width) / 2, CANVAS_H - 90),
-        counter,
+        (left, CANVAS_H - 74),
+        f"{index:02d}/{total:02d}",
         font=counter_font,
-        fill=(160, 160, 160),
+        fill=tuple(min(255, c + 110) for c in POST_BG_COLOR),
     )
 
     canvas.save(str(out_path), format="PNG")
@@ -3562,9 +3606,20 @@ def process_post_record(record: Dict[str, Any]) -> None:
     update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
 
     caption = pick_post_caption(fields)
-    blocks = split_text_into_slides(caption)
+
+    # Slide 1 title = the post's opening line (hook); the rest is the body text.
+    body_text = strip_trailing_hashtags(caption)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body_text) if p.strip()]
+    if len(paragraphs) >= 2:
+        title = paragraphs[0]
+        body = "\n\n".join(paragraphs[1:])
+    else:
+        title = safe_get(fields, "Job Title", "") or (paragraphs[0] if paragraphs else "")
+        body = body_text
+
+    blocks = split_text_into_slides(body, min_slides=2, max_slides=7)
     if not blocks:
-        blocks = [caption or safe_get(fields, "Job Title") or "SV FASHION MEDIA"]
+        blocks = [body or title or "SV FASHION MEDIA"]
 
     slide_dir = OUTPUT_DIR / record_id / "post"
     ensure_dir(slide_dir)
@@ -3572,7 +3627,7 @@ def process_post_record(record: Dict[str, Any]) -> None:
     slide_paths = []
     for idx, block in enumerate(blocks, start=1):
         out_path = slide_dir / f"post_slide_{idx:02d}.png"
-        render_post_slide(block, idx, len(blocks), out_path)
+        render_post_slide(block, idx, len(blocks), out_path, title=title if idx == 1 else "")
         slide_paths.append(str(out_path))
         print(f"Rendered post slide {idx}/{len(blocks)}")
 
@@ -3802,7 +3857,17 @@ def process_record(record: Dict[str, Any]) -> None:
     if is_post_job:
         if status_value == STATUS_APPROVED:
             print("DEBUG post action: Approved Visual -> render text slides")
-            process_post_record(record)
+            try:
+                process_post_record(record)
+            except Exception as post_error:
+                print("Post pipeline failed:", repr(post_error))
+                update_airtable_record(
+                    record["id"],
+                    {
+                        "Visual Status": STATUS_ERROR,
+                        "Render Notes": f"Post pipeline failed at {now_iso()}:\n{repr(post_error)}",
+                    },
+                )
         else:
             print(f"Post record waiting for text approval. Status: {status_value}")
         return
