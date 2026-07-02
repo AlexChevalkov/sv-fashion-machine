@@ -232,7 +232,9 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
         "{Visual Status}='Approved Text',"
         "AND("
         "{Visual Status}='Brief Ready',"
-        "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format}))"
+        "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format})),"
+        "{Format}!='Post',"
+        "{Chosen Format}!='Post'"
         ")"
         ")"
     )
@@ -3439,6 +3441,131 @@ def publish_draft_to_buffer(
         return False, f"Buffer publish exception: {exc!r}"
 
 
+def parse_post_slides(fields: Dict[str, Any]) -> List[str]:
+    """Split the post text (Slide Copy) into slide blocks — one block per slide.
+    Prefers blank-line separated blocks; falls back to single lines."""
+    raw = safe_get(fields, "Slide Copy", "")
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", raw) if b.strip()]
+    if len(blocks) < 2:
+        blocks = [b.strip() for b in str(raw).split("\n") if b.strip()]
+    return blocks
+
+
+def render_post_slide(text: str, index: int, total: int, out_path: Path) -> None:
+    """
+    Render one text-only slide: solid colour background + centred text.
+    Placeholder design — colours/typography to be refined later.
+    """
+    background = (20, 20, 22)
+    text_color = (245, 245, 245)
+
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), background)
+    draw = ImageDraw.Draw(canvas)
+
+    font_path = globals().get(
+        "FONT_BOLD", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"
+    )
+    font = get_font(font_path, 52)
+
+    max_width = CANVAS_W - 160
+    lines = wrap_text_lines(draw, text, font, max_width)
+
+    line_height = font.size + 18
+    block_height = line_height * max(1, len(lines))
+    y = (CANVAS_H - block_height) // 2
+
+    for line in lines:
+        line_width = draw.textlength(line, font=font)
+        x = (CANVAS_W - line_width) / 2
+        draw.text((x, y), line, font=font, fill=text_color)
+        y += line_height
+
+    counter_font = get_font(
+        globals().get("FONT_REGULAR", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
+        26,
+    )
+    counter = f"{index:02d}/{total:02d}"
+    counter_width = draw.textlength(counter, font=counter_font)
+    draw.text(
+        ((CANVAS_W - counter_width) / 2, CANVAS_H - 90),
+        counter,
+        font=counter_font,
+        fill=(160, 160, 160),
+    )
+
+    canvas.save(str(out_path), format="PNG")
+
+
+def process_post_record(record: Dict[str, Any]) -> None:
+    """
+    Text-only Post: render N colour-background text slides (no Krea, no video),
+    upload to R2 and push a carousel DRAFT to Buffer. Caption = full post text.
+    """
+    record_id = record["id"]
+    fields = record.get("fields", {})
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    print("Post Mode detected (text-only slides).")
+
+    update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
+
+    blocks = parse_post_slides(fields)
+    if not blocks:
+        blocks = [
+            safe_get(fields, "Final Reel Caption")
+            or safe_get(fields, "Job Title")
+            or "SV FASHION MEDIA"
+        ]
+
+    slide_dir = OUTPUT_DIR / record_id / "post"
+    ensure_dir(slide_dir)
+
+    slide_paths = []
+    for idx, block in enumerate(blocks, start=1):
+        out_path = slide_dir / f"post_slide_{idx:02d}.png"
+        render_post_slide(block, idx, len(blocks), out_path)
+        slide_paths.append(str(out_path))
+        print(f"Rendered post slide {idx}/{len(blocks)}")
+
+    caption = pick_post_caption(fields)
+
+    ok, info = publish_draft_to_buffer(
+        record_id,
+        is_reel=False,
+        caption=caption,
+        image_local_paths=slide_paths,
+        job_folder=build_job_r2_folder(record),
+    )
+    print("Buffer publish result:", ok, info)
+
+    if ok:
+        final_status = "Sent for Buffer"
+        buffer_note = f"Buffer draft created automatically. {info}"
+    else:
+        final_status = STATUS_READY_FOR_BUFFER
+        buffer_note = f"Buffer draft NOT created ({info}). Post manually from the output."
+
+    update_airtable_record(
+        record_id,
+        {
+            "Visual Status": final_status,
+            "Slide Count": len(blocks),
+            "Render Notes": append_note(
+                existing_notes,
+                f"""
+Post Mode: {len(blocks)} text slides rendered (colour background + text, no Krea).
+{buffer_note}
+Status moved to {final_status}.
+Generated at:
+{now_iso()}
+""",
+            ),
+        },
+    )
+
+    print("Post finalize complete. Status:", final_status)
+
+
 def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
     record_id = record["id"]
 
@@ -3621,6 +3748,18 @@ def process_record(record: Dict[str, Any]) -> None:
     print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
 
        # REEL PIPELINE
+    is_post_job = (format_value == "post")
+
+    # POST PIPELINE (text-only slides). Single approval gate: it waits at
+    # Brief Ready for the human to review the text, then renders on Approved Visual.
+    if is_post_job:
+        if status_value == STATUS_APPROVED:
+            print("DEBUG post action: Approved Visual -> render text slides")
+            process_post_record(record)
+        else:
+            print(f"Post record waiting for text approval. Status: {status_value}")
+        return
+
     if is_reel_job:
         print("DEBUG entering reel pipeline")
 

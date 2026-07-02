@@ -181,6 +181,19 @@ def generate_visual_brief(job_fields: dict, post_fields: dict) -> dict:
         or job_fields.get("Recommended Format")
         or "Reel + Carousel"
     )
+
+    is_post = str(chosen_format).strip().lower() == "post"
+
+    post_block = ""
+    if is_post:
+        post_block = (
+            "\n\nВАЖНО — ЭТО ФОРМАТ POST (текстовый пост слайдами):\n"
+            "- Это НЕ reel и НЕ image-карусель. Пост = чистый ТЕКСТ, разложенный по слайдам с цветным фоном.\n"
+            "- Final Reel Caption = ПОЛНЫЙ готовый текст поста для Instagram (он же пойдёт в подпись).\n"
+            "- Slide Copy = ТОТ ЖЕ текст поста, осмысленно разбитый на 3–7 слайдов. Число слайдов реши сам(а) по длине текста: короткий текст — меньше слайдов, длинный — больше. Каждый слайд — законченный смысловой блок (1–4 коротких предложения). РАЗДЕЛЯЙ слайды ПУСТОЙ СТРОКОЙ между блоками.\n"
+            "- Slide Count = число слайдов, на которое ты разбил(а) текст (3–7).\n"
+            "- Поля для reel и image-карусели (Reel Keyframe Prompts, Reel Motion Prompts, On-screen Text, Generated Carousel Prompts, Krea Prompt Pack, Shot List) для Post НЕ нужны — верни их пустой строкой \"\".\n"
+        )
     visual_mode = job_fields.get("Visual Mode", "Hybrid")
 
     try:
@@ -248,7 +261,7 @@ Source URL:
 {source_url}
 
 Сделай Visual Brief для Reels и/или Carousel.
-
+{post_block}
 Важно:
 - Если Chosen Format = "Reel + Carousel", сделай оба пакета.
 - Reels должны быть рассчитаны на рост охвата: сильные первые 2 секунды, ясный визуальный конфликт, 20-40 секунд.
@@ -365,6 +378,10 @@ Krea Model Recommendation: "Krea Image", "Nano Banana", "Kling", "Runway", "Veo 
 
     for field in required_fields:
         if field not in brief:
+            if is_post:
+                # Post uses only the text fields; anything else may be absent.
+                brief[field] = ""
+                continue
             raise ValueError(f"Missing field from Claude response: {field}")
 
     brief["Visual Mode"] = brief.get("Visual Mode") or "Hybrid"
