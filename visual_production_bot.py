@@ -81,6 +81,45 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify_ascii(text: str) -> str:
+    """Lowercase ASCII slug (Cyrillic transliterated) safe for URLs/keys."""
+    chars = []
+    for ch in str(text or "").lower():
+        if ch in _TRANSLIT:
+            chars.append(_TRANSLIT[ch])
+        elif ch.isalnum() and ord(ch) < 128:
+            chars.append(ch)
+        else:
+            chars.append("-")
+    slug = re.sub(r"-+", "-", "".join(chars)).strip("-")
+    return slug
+
+
+def build_job_r2_folder(record: Dict[str, Any]) -> str:
+    """
+    Human-readable, chronologically sortable R2 folder for one job:
+        <YYYY-MM-DD>_<title-slug>_<record_id>
+    Deterministic per record (derived from stable fields), so every step of a
+    job writes into the SAME folder, and folders sort by creation date.
+    """
+    record_id = record.get("id", "unknown")
+    fields = record.get("fields", {})
+    created = str(record.get("createdTime", "") or "")
+    date_part = created[:10] if len(created) >= 10 else "0000-00-00"
+    title = safe_get(fields, "Source Post Title") or safe_get(fields, "Job Title") or "untitled"
+    slug = slugify_ascii(title)[:40].strip("-") or "untitled"
+    return f"{date_part}_{slug}_{record_id}"
+
+
 def mirror_to_r2(local_path: Any, key: str, fallback_url: str) -> str:
     """
     Upload a freshly generated file to Cloudflare R2 and return its PERMANENT
@@ -1246,7 +1285,7 @@ def process_reel_keyframes_record(record: Dict[str, Any]) -> None:
 
             permanent_url = mirror_to_r2(
                 local_path,
-                f"bot-output/{record_id}/keyframes/{index:02d}_{name}.png",
+                f"bot-output/{build_job_r2_folder(record)}/keyframes/{index:02d}_{name}.png",
                 image_url,
             )
 
@@ -1786,7 +1825,7 @@ Hard rules:
 
             permanent_url = mirror_to_r2(
                 local_path,
-                f"bot-output/{record_id}/motion/{int(index):02d}_{name}.mp4",
+                f"bot-output/{build_job_r2_folder(record)}/motion/{int(index):02d}_{name}.mp4",
                 video_url,
             )
 
@@ -3362,12 +3401,14 @@ def publish_draft_to_buffer(
     caption: str,
     video_local_path: str = "",
     image_local_paths: Any = None,
+    job_folder: str = "",
 ):
     """
     Upload the final media to R2 (permanent public URL) and create an
     Instagram DRAFT in Buffer. Returns (ok: bool, info: str). Never raises,
     so a Buffer/R2 problem can never break the production pipeline.
     """
+    folder = job_folder or record_id
     try:
         if not buffer_is_configured():
             return False, "Buffer not configured (no BUFFER_ACCESS_TOKEN)."
@@ -3375,7 +3416,7 @@ def publish_draft_to_buffer(
         if is_reel:
             video_url = mirror_to_r2(
                 video_local_path,
-                f"bot-output/{record_id}/final/final_reel.mp4",
+                f"bot-output/{folder}/final/final_reel.mp4",
                 "",
             )
             if not video_url:
@@ -3386,7 +3427,7 @@ def publish_draft_to_buffer(
         for index, local_path in enumerate(image_local_paths or [], start=1):
             url = mirror_to_r2(
                 local_path,
-                f"bot-output/{record_id}/final/slide_{index:02d}.png",
+                f"bot-output/{folder}/final/slide_{index:02d}.png",
                 "",
             )
             if url:
@@ -3456,6 +3497,7 @@ def process_reel_after_visual_approval(record: Dict[str, Any]) -> None:
             is_reel=True,
             caption=caption,
             video_local_path="outputs/final_reel_text_v1.mp4",
+            job_folder=build_job_r2_folder(current_record),
         )
         print("Buffer publish result:", ok, info)
 
@@ -3726,6 +3768,7 @@ def process_record(record: Dict[str, Any]) -> None:
                     is_reel=False,
                     caption=caption,
                     image_local_paths=assembled_paths,
+                    job_folder=build_job_r2_folder(record),
                 )
                 print("Buffer publish result:", ok, info)
 
@@ -3805,7 +3848,7 @@ def process_record(record: Dict[str, Any]) -> None:
 
             permanent_url = mirror_to_r2(
                 raw_path,
-                f"bot-output/{record_id}/carousel/slide_{slide_num:02d}.png",
+                f"bot-output/{build_job_r2_folder(record)}/carousel/slide_{slide_num:02d}.png",
                 url,
             )
 
