@@ -3530,7 +3530,8 @@ def load_post_font(bold: bool, size: int) -> ImageFont.FreeTypeFont:
 
 
 # Post slide layout (pixels on a 1080x1350 canvas).
-POST_MARGIN_X = 96      # left/right margin
+POST_MARGIN_LEFT = 128    # left margin (wider)
+POST_MARGIN_RIGHT = 96    # right margin
 POST_MARGIN_TOP = 130
 POST_MARGIN_BOTTOM = 150
 
@@ -3544,8 +3545,8 @@ def render_post_slide(text: str, index: int, total: int, out_path: Path, title: 
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), POST_BG_COLOR)
     draw = ImageDraw.Draw(canvas)
 
-    left = POST_MARGIN_X
-    max_width = CANVAS_W - 2 * POST_MARGIN_X
+    left = POST_MARGIN_LEFT
+    max_width = CANVAS_W - POST_MARGIN_LEFT - POST_MARGIN_RIGHT
     y = POST_MARGIN_TOP
 
     # Title on the first slide: uppercase, bold, then a blank row.
