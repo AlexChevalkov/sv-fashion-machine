@@ -3696,11 +3696,11 @@ def process_post_record(record: Dict[str, Any]) -> None:
         record_id,
         {
             "Visual Status": final_status,
-            "Slide Count": len(blocks),
+            "Slide Count": len(slide_paths),
             "Render Notes": append_note(
                 existing_notes,
                 f"""
-Post Mode: {len(blocks)} text slides rendered (colour background + text, no Krea).
+Post Mode: {len(slide_paths)} text slides rendered (colour background + text, no Krea).
 {buffer_note}
 Status moved to {final_status}.
 Generated at:
