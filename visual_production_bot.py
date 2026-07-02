@@ -3536,61 +3536,115 @@ POST_MARGIN_TOP = 130
 POST_MARGIN_BOTTOM = 150
 
 
-def render_post_slide(text: str, index: int, total: int, out_path: Path, title: str = "") -> None:
-    """
-    Render one text-only Post slide: solid colour background, LEFT-aligned text.
-    Slide 1 (title provided) shows the title in UPPERCASE, one blank row, then text.
-    Font size auto-fits so the whole block fits the slide.
-    """
-    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), POST_BG_COLOR)
-    draw = ImageDraw.Draw(canvas)
+def _wrap_body_to_lines(draw, text, font, max_width):
+    """Wrap body text into display lines, inserting a blank line ("") between
+    paragraphs so paragraph breaks survive inside a slide."""
+    lines = []
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    for i, paragraph in enumerate(paragraphs):
+        if i > 0:
+            lines.append("")
+        lines.extend(wrap_text_lines(draw, paragraph, font, max_width))
+    return lines
 
+
+def render_all_post_slides(slide_dir, title: str, body: str):
+    """
+    Balanced Post layout:
+    - ONE font size for all slides (consistent look);
+    - body split into 3–7 chunks with ~equal line counts (only the LAST slide
+      may have fewer lines); paragraph breaks kept inside a slide;
+    - text vertically centred; brand top-left; slide counter bottom-left;
+    - slide 1 additionally shows the title in UPPERCASE.
+    Returns the list of saved slide file paths.
+    """
+    measure = ImageDraw.Draw(Image.new("RGB", (CANVAS_W, CANVAS_H)))
     left = POST_MARGIN_LEFT
     max_width = CANVAS_W - POST_MARGIN_LEFT - POST_MARGIN_RIGHT
-    y = POST_MARGIN_TOP
 
-    # Title on the first slide: uppercase, bold, then a blank row.
-    if title.strip():
-        title_font = load_post_font(bold=True, size=60)
-        title_line_h = int(60 * 1.18)
-        for line in wrap_text_lines(draw, title.strip().upper(), title_font, max_width):
-            draw.text((left, y), line, font=title_font, fill=POST_TEXT_COLOR)
-            y += title_line_h
-        y += title_line_h  # one blank row between title and text
+    region_top = 200               # below the brand header
+    region_bottom = CANVAS_H - 118  # above the counter
+    region_h = region_bottom - region_top
 
-    available_h = CANVAS_H - y - POST_MARGIN_BOTTOM
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()] or [text]
-
-    # Auto-fit the body font so every paragraph fits the remaining height.
-    body_font = load_post_font(bold=False, size=27)
-    line_h = int(27 * 1.4)
-    para_gap = int(27 * 0.9)
-    wrapped_paragraphs = [wrap_text_lines(draw, p, body_font, max_width) for p in paragraphs]
+    chosen = None
     for size in (46, 42, 38, 34, 30, 27):
         body_font = load_post_font(bold=False, size=size)
-        line_h = int(size * 1.4)
-        para_gap = int(size * 0.9)
-        wrapped_paragraphs = [wrap_text_lines(draw, p, body_font, max_width) for p in paragraphs]
-        total_h = sum(line_h * len(wl) for wl in wrapped_paragraphs) + para_gap * (len(paragraphs) - 1)
-        if total_h <= available_h:
+        line_h = int(size * 1.42)
+        title_font = load_post_font(bold=True, size=size + 16)
+        title_line_h = int((size + 16) * 1.16)
+        title_lines = (
+            wrap_text_lines(measure, title.strip().upper(), title_font, max_width)
+            if title.strip() else []
+        )
+        title_block_h = (len(title_lines) * title_line_h + title_line_h) if title_lines else 0
+
+        body_lines = _wrap_body_to_lines(measure, body, body_font, max_width)
+        total = max(1, len(body_lines))
+
+        max_lines_other = max(1, region_h // line_h)
+        max_lines_first = max(1, (region_h - title_block_h) // line_h)
+
+        for n_slides in range(3, 8):
+            lines_per_slide = (total + n_slides - 1) // n_slides
+            if lines_per_slide <= max_lines_other and lines_per_slide <= max_lines_first:
+                chosen = (body_font, line_h, title_font, title_lines, title_line_h,
+                          title_block_h, body_lines, n_slides)
+                break
+        if chosen:
             break
 
-    for wrapped in wrapped_paragraphs:
-        for line in wrapped:
-            draw.text((left, y), line, font=body_font, fill=POST_TEXT_COLOR)
-            y += line_h
-        y += para_gap
+    if chosen is None:
+        chosen = (body_font, line_h, title_font, title_lines, title_line_h,
+                  title_block_h, body_lines, 7)
 
-    # Slide counter, bottom-left.
+    body_font, line_h, title_font, title_lines, title_line_h, title_block_h, body_lines, n_slides = chosen
+    lines_per_slide = (max(1, len(body_lines)) + n_slides - 1) // n_slides
+
+    brand = globals().get("BRAND_NAME", "SV FASHION MEDIA")
+    brand_font = load_post_font(bold=True, size=26)
     counter_font = load_post_font(bold=False, size=24)
-    draw.text(
-        (left, CANVAS_H - 74),
-        f"{index:02d}/{total:02d}",
-        font=counter_font,
-        fill=tuple(min(255, c + 110) for c in POST_BG_COLOR),
-    )
+    counter_color = tuple(min(255, c + 110) for c in POST_BG_COLOR)
 
-    canvas.save(str(out_path), format="PNG")
+    slide_paths = []
+    for i in range(n_slides):
+        chunk = body_lines[i * lines_per_slide:(i + 1) * lines_per_slide]
+        while chunk and chunk[0] == "":
+            chunk.pop(0)
+        while chunk and chunk[-1] == "":
+            chunk.pop()
+        is_first = (i == 0)
+
+        canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), POST_BG_COLOR)
+        draw = ImageDraw.Draw(canvas)
+
+        # Brand header, top-left (like carousels/reels).
+        draw.text((left, 74), brand, font=brand_font, fill=POST_TEXT_COLOR)
+        draw.line([(left, 122), (left + 120, 122)], fill=POST_TEXT_COLOR, width=2)
+
+        block_h = len(chunk) * line_h + (title_block_h if is_first else 0)
+        y = region_top + max(0, (region_h - block_h) // 2)
+
+        if is_first and title_lines:
+            for tline in title_lines:
+                draw.text((left, y), tline, font=title_font, fill=POST_TEXT_COLOR)
+                y += title_line_h
+            y += title_line_h  # blank row between title and text
+
+        for line in chunk:
+            if line:
+                draw.text((left, y), line, font=body_font, fill=POST_TEXT_COLOR)
+            y += line_h
+
+        # Slide counter, bottom-left.
+        draw.text((left, CANVAS_H - 74), f"{i + 1:02d}/{n_slides:02d}",
+                  font=counter_font, fill=counter_color)
+
+        out_path = slide_dir / f"post_slide_{i + 1:02d}.png"
+        canvas.save(str(out_path), format="PNG")
+        slide_paths.append(str(out_path))
+        print(f"Rendered post slide {i + 1}/{n_slides}")
+
+    return slide_paths
 
 
 def process_post_record(record: Dict[str, Any]) -> None:
@@ -3618,19 +3672,9 @@ def process_post_record(record: Dict[str, Any]) -> None:
         title = safe_get(fields, "Job Title", "") or (paragraphs[0] if paragraphs else "")
         body = body_text
 
-    blocks = split_text_into_slides(body, min_slides=2, max_slides=7)
-    if not blocks:
-        blocks = [body or title or "SV FASHION MEDIA"]
-
     slide_dir = OUTPUT_DIR / record_id / "post"
     ensure_dir(slide_dir)
-
-    slide_paths = []
-    for idx, block in enumerate(blocks, start=1):
-        out_path = slide_dir / f"post_slide_{idx:02d}.png"
-        render_post_slide(block, idx, len(blocks), out_path, title=title if idx == 1 else "")
-        slide_paths.append(str(out_path))
-        print(f"Rendered post slide {idx}/{len(blocks)}")
+    slide_paths = render_all_post_slides(slide_dir, title, body)
 
     ok, info = publish_draft_to_buffer(
         record_id,
