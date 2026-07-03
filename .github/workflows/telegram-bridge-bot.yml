@@ -1,0 +1,35 @@
+name: Telegram Bridge Bot
+
+# Approval bridge: sends pending items to Telegram with Да/Нет buttons and
+# applies your taps back to Airtable. Driven by cron-job.org (every few minutes).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: telegram-bridge
+  cancel-in-progress: false
+
+jobs:
+  telegram-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Telegram bridge
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: Content Inbox
+          AIRTABLE_VISUAL_TABLE_NAME: Visual Jobs
+        run: python telegram_bridge_bot.py
