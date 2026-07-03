@@ -110,7 +110,12 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
         status = sel(fields, "Status")
         if status != "Needs Review":
             return f"Уже обработано (статус: {status})."
-        if decision == "y":
+        format_map = {"post": "Post", "reel": "Reel Idea", "carousel": "Carousel"}
+        if decision in format_map:
+            chosen = format_map[decision]
+            at_update(table, record_id, {"Status": "Approved", "Format": chosen})
+            return f"✅ Утверждено как «{chosen}»."
+        if decision == "y":  # backward-compat with old Да/Нет cards
             at_update(table, record_id, {"Status": "Approved"})
             return "✅ Тема утверждена."
         at_update(table, record_id, {"Status": "Rejected"})
@@ -172,14 +177,9 @@ def process_updates() -> int:
 
 # --------------------------------------------------- send approval cards ---
 
-def send_card(text: str, table_key: str, record_id: str) -> None:
-    keyboard = {
-        "inline_keyboard": [[
-            {"text": "✅ Да", "callback_data": f"y|{table_key}|{record_id}"},
-            {"text": "❌ Нет", "callback_data": f"n|{table_key}|{record_id}"},
-        ]]
-    }
-    tg("sendMessage", chat_id=CHAT_ID, text=text, reply_markup=keyboard)
+def send_card(text: str, keyboard_rows: list) -> None:
+    tg("sendMessage", chat_id=CHAT_ID, text=text,
+       reply_markup={"inline_keyboard": keyboard_rows})
 
 
 def extract_urls(text: str) -> list:
@@ -197,8 +197,20 @@ def notify_pending() -> int:
         title = sel(fields, "Title") or "Без названия"
         hook = sel(fields, "HOOK")
         caption = (sel(fields, "Final Caption") or "")[:500]
-        text = f"🆕 Новая тема на согласование\n\n{title}\n\n{hook}\n\n{caption}\n\nУтвердить тему?"
-        send_card(text, "content", record["id"])
+        text = (
+            f"🆕 Новая тема на согласование\n\n{title}\n\n{hook}\n\n{caption}\n\n"
+            f"В каком формате развить?"
+        )
+        rid = record["id"]
+        keyboard = [
+            [
+                {"text": "📝 Post", "callback_data": f"post|content|{rid}"},
+                {"text": "🎬 Reel Idea", "callback_data": f"reel|content|{rid}"},
+                {"text": "🖼 Carousel", "callback_data": f"carousel|content|{rid}"},
+            ],
+            [{"text": "❌ Нет", "callback_data": f"n|content|{rid}"}],
+        ]
+        send_card(text, keyboard)
         at_update(CONTENT_TABLE, record["id"], {NOTIFIED_FIELD: "Needs Review"})
         sent += 1
 
@@ -227,7 +239,12 @@ def notify_pending() -> int:
             links = "\n".join(urls[:8]) if urls else "(ссылки — в карточке Airtable)"
             text = f"🖼 Визуал готов ({fmt})\n\n{job_title}\n\nПосмотри и утверди:\n{links}"
 
-        send_card(text, "visual", record["id"])
+        rid = record["id"]
+        keyboard = [[
+            {"text": "✅ Да", "callback_data": f"y|visual|{rid}"},
+            {"text": "❌ Нет", "callback_data": f"n|visual|{rid}"},
+        ]]
+        send_card(text, keyboard)
         at_update(VISUAL_TABLE, record["id"], {NOTIFIED_FIELD: status})
         sent += 1
 
