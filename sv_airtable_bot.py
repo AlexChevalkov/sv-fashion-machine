@@ -955,6 +955,51 @@ def send_to_airtable_webhook(card: dict) -> None:
         raise RuntimeError("Airtable webhook request failed")
 
 
+def create_content_inbox_record(card: dict) -> None:
+    """
+    Create the Content Inbox record DIRECTLY via the Airtable API.
+
+    More reliable than the webhook + automation, which returns 200 on receipt
+    but can silently fail to create the record (disabled/errored automation or
+    an automation run-limit). The bot already has AIRTABLE_API_KEY.
+    """
+    table_encoded = quote(AIRTABLE_TABLE_NAME, safe="")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_encoded}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    fields = {
+        "Title": card.get("title", ""),
+        "HOOK": card.get("hook", ""),
+        "Visual Headline": card.get("visual_headline", ""),
+        "Final Caption": card.get("final_caption", ""),
+        "Raw Text": card.get("raw_text", ""),
+        "Source URL": card.get("source_url", ""),
+        "Status": card.get("status", "Needs Review"),
+        "Format": card.get("format", "Single Post"),
+        "Rubric": card.get("rubric", "Fashion Context"),
+        "Source": card.get("source", "Bot"),
+    }
+    fields = {key: value for key, value in fields.items() if value not in (None, "")}
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"fields": fields, "typecast": True},
+        timeout=30,
+    )
+
+    print("Create Content Inbox status:", response.status_code)
+    print("Create Content Inbox response:", response.text[:1000])
+
+    if response.status_code not in [200, 201]:
+        raise RuntimeError("Airtable direct create failed")
+
+    print("Done. Card created directly in Content Inbox.")
+
+
 def main() -> None:
     print("SV Airtable Bot started:", datetime.now(timezone.utc).isoformat())
     webhook_info = urlparse(AIRTABLE_WEBHOOK_URL)
@@ -987,7 +1032,13 @@ def main() -> None:
     print("\n=== Generated card ===")
     print(json.dumps(card, ensure_ascii=False, indent=2))
 
-    send_to_airtable_webhook(card)
+    # Write directly to Content Inbox (reliable). Fall back to the webhook
+    # automation only if the direct API create fails.
+    try:
+        create_content_inbox_record(card)
+    except Exception as direct_error:
+        print("Direct create failed, falling back to webhook:", repr(direct_error))
+        send_to_airtable_webhook(card)
 
     # If an evergreen idea was used, mark it 'Used' so it rotates out next time.
     if selected_context.get("type") == "evergreen":
