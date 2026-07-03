@@ -3567,11 +3567,13 @@ def render_all_post_slides(slide_dir, title: str, body: str):
     region_h = region_bottom - region_top
 
     chosen = None
-    for size in (46, 42, 38, 34, 30, 27):
+    for size in (47, 43, 39, 35, 31, 28):
         body_font = load_post_font(bold=False, size=size)
         line_h = int(size * 1.42)
-        title_font = load_post_font(bold=True, size=size + 16)
-        title_line_h = int((size + 16) * 1.16)
+        # Title size kept constant vs the previous look (offset +15 cancels the
+        # +1 body bump); title line spacing slightly increased.
+        title_font = load_post_font(bold=True, size=size + 15)
+        title_line_h = int((size + 15) * 1.22)
         title_lines = (
             wrap_text_lines(measure, title.strip().upper(), title_font, max_width)
             if title.strip() else []
