@@ -141,8 +141,17 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
 
 
 def process_updates() -> int:
+    # A webhook would silently divert updates away from getUpdates — remove it.
+    webhook = (tg("getWebhookInfo").get("result") or {})
+    if webhook.get("url"):
+        print("WARNING: webhook was set:", webhook.get("url"), "- deleting.")
+        tg("deleteWebhook")
+
     data = tg("getUpdates")
+    if not data.get("ok", True):
+        print("getUpdates NOT ok:", str(data)[:300])
     updates = data.get("result", []) or []
+    print("Raw updates:", [(u["update_id"], "callback" if u.get("callback_query") else "other") for u in updates])
     max_update_id = None
 
     for update in updates:
@@ -151,13 +160,16 @@ def process_updates() -> int:
         if not callback:
             continue
 
-        parts = (callback.get("data") or "").split("|")
+        payload = callback.get("data") or ""
+        print("Callback data:", payload)
+        parts = payload.split("|")
         if len(parts) != 3:
             tg("answerCallbackQuery", callback_query_id=callback["id"], text="Непонятная кнопка")
             continue
 
         decision, table_key, record_id = parts
         result = apply_decision(decision, table_key, record_id)
+        print("Decision result:", result)
 
         tg("answerCallbackQuery", callback_query_id=callback["id"], text=result)
         message = callback.get("message", {})
