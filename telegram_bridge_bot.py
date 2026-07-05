@@ -141,13 +141,21 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
 
 
 def process_updates() -> int:
+    me = (tg("getMe").get("result") or {})
+    print("Polling bot:", me.get("id"), "@" + str(me.get("username")))
+
     # A webhook would silently divert updates away from getUpdates — remove it.
     webhook = (tg("getWebhookInfo").get("result") or {})
+    print("Webhook url:", webhook.get("url") or "(none)",
+          "| pending_update_count:", webhook.get("pending_update_count"))
     if webhook.get("url"):
-        print("WARNING: webhook was set:", webhook.get("url"), "- deleting.")
+        print("WARNING: webhook was set - deleting.")
         tg("deleteWebhook")
 
-    data = tg("getUpdates")
+    # Explicitly request callback_query: Telegram REMEMBERS the last
+    # allowed_updates, and the old (text-based) bridge may have restricted it
+    # to ["message"], which silently drops button taps.
+    data = tg("getUpdates", allowed_updates=["message", "callback_query"])
     if not data.get("ok", True):
         print("getUpdates NOT ok:", str(data)[:300])
     updates = data.get("result", []) or []
@@ -182,7 +190,7 @@ def process_updates() -> int:
 
     # Confirm processed updates so the next run does not see them again.
     if max_update_id is not None:
-        tg("getUpdates", offset=max_update_id + 1)
+        tg("getUpdates", offset=max_update_id + 1, allowed_updates=["message", "callback_query"])
 
     return len(updates)
 
