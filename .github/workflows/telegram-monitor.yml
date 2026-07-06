@@ -1,0 +1,56 @@
+name: Telegram Monitor
+
+# Temporary 5-minute live monitor: long-polls getUpdates and prints RAW
+# Telegram responses (including errors) without confirming anything.
+# Used to determine definitively what happens to button taps. Delete after.
+on:
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install requests
+      - name: Live monitor (5 minutes)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, time, requests, json
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          api = f"https://api.telegram.org/bot{token}"
+
+          def show(label, resp):
+              print(f"--- {label} | HTTP {resp.status_code} ---")
+              print(resp.text[:3000])
+              print()
+
+          show("getMe", requests.get(f"{api}/getMe", timeout=30))
+          show("getWebhookInfo START", requests.get(f"{api}/getWebhookInfo", timeout=30))
+
+          start = time.time()
+          poll = 0
+          while time.time() - start < 300:
+              poll += 1
+              try:
+                  r = requests.post(
+                      f"{api}/getUpdates",
+                      json={"timeout": 45, "allowed_updates": []},
+                      timeout=60,
+                  )
+                  stamp = time.strftime("%H:%M:%S", time.gmtime())
+                  print(f"=== poll {poll} at {stamp} UTC | HTTP {r.status_code} ===")
+                  print(r.text[:3000])
+                  print(flush=True)
+              except Exception as exc:
+                  print(f"=== poll {poll} EXCEPTION: {exc!r} ===", flush=True)
+                  time.sleep(5)
+
+          show("getWebhookInfo END", requests.get(f"{api}/getWebhookInfo", timeout=30))
+          PY
