@@ -19,11 +19,13 @@ jobs:
       - name: Live monitor (5 minutes)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
           import os, time, requests, json
 
           token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
           api = f"https://api.telegram.org/bot{token}"
 
           def show(label, resp):
@@ -33,6 +35,15 @@ jobs:
 
           show("getMe", requests.get(f"{api}/getMe", timeout=30))
           show("getWebhookInfo START", requests.get(f"{api}/getWebhookInfo", timeout=30))
+
+          # Send a fresh unmistakable test card with one button.
+          show("send TEST CARD", requests.post(f"{api}/sendMessage", json={
+              "chat_id": chat_id,
+              "text": "🧪 ТЕСТ КНОПКИ — нажми кнопку ниже прямо сейчас",
+              "reply_markup": {"inline_keyboard": [[
+                  {"text": "🔴 НАЖМИ МЕНЯ", "callback_data": "probe|test|test"}
+              ]]},
+          }, timeout=30))
 
           start = time.time()
           poll = 0
