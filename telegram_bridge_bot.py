@@ -140,6 +140,32 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
     return f"Уже обработано (статус: {status})."
 
 
+def handle_update(update: dict) -> None:
+    callback = update.get("callback_query")
+    if not callback:
+        return
+
+    payload = callback.get("data") or ""
+    print("Callback data:", payload)
+    parts = payload.split("|")
+    if len(parts) != 3:
+        tg("answerCallbackQuery", callback_query_id=callback["id"], text="Непонятная кнопка")
+        return
+
+    decision, table_key, record_id = parts
+    result = apply_decision(decision, table_key, record_id)
+    print("Decision result:", result)
+
+    tg("answerCallbackQuery", callback_query_id=callback["id"], text=result)
+    message = callback.get("message", {})
+    tg(
+        "editMessageText",
+        chat_id=message.get("chat", {}).get("id"),
+        message_id=message.get("message_id"),
+        text=(message.get("text", "") + f"\n\n— {result}"),
+    )
+
+
 def process_updates() -> int:
     me = (tg("getMe").get("result") or {})
     print("Polling bot:", me.get("id"), "@" + str(me.get("username")))
@@ -152,47 +178,38 @@ def process_updates() -> int:
         print("WARNING: webhook was set - deleting.")
         tg("deleteWebhook")
 
-    # Explicitly request callback_query: Telegram REMEMBERS the last
-    # allowed_updates, and the old (text-based) bridge may have restricted it
-    # to ["message"], which silently drops button taps.
-    data = tg("getUpdates", allowed_updates=["message", "callback_query"])
-    if not data.get("ok", True):
-        print("getUpdates NOT ok:", str(data)[:300])
-    updates = data.get("result", []) or []
-    print("Raw updates:", [(u["update_id"], "callback" if u.get("callback_query") else "other") for u in updates])
-    max_update_id = None
+    # Drain loop. Two hard-won rules (proven live on 2026-07-06):
+    # 1. allowed_updates MUST be [] (default = all common types). Passing an
+    #    explicit list like ["message","callback_query"] made Telegram WITHHOLD
+    #    queued callback_query updates from getUpdates while still counting
+    #    them as pending — and the confirming call then destroyed them unread.
+    #    The empty-list form was verified to deliver everything, repeatedly.
+    # 2. Never ignore the result of a confirming call (offset=max+1): it can
+    #    carry updates that arrived meanwhile, so each batch is processed until
+    #    the queue is empty, and only then the final confirm is left standing.
+    processed = 0
+    offset = None
 
-    for update in updates:
-        max_update_id = update["update_id"]
-        callback = update.get("callback_query")
-        if not callback:
-            continue
+    while True:
+        params = {"allowed_updates": []}
+        if offset is not None:
+            params["offset"] = offset
+        data = tg("getUpdates", **params)
+        if not data.get("ok", True):
+            print("getUpdates NOT ok:", str(data)[:300])
+            break
 
-        payload = callback.get("data") or ""
-        print("Callback data:", payload)
-        parts = payload.split("|")
-        if len(parts) != 3:
-            tg("answerCallbackQuery", callback_query_id=callback["id"], text="Непонятная кнопка")
-            continue
+        updates = data.get("result", []) or []
+        print("Batch:", [(u["update_id"], "callback" if u.get("callback_query") else "other") for u in updates])
+        if not updates:
+            break
 
-        decision, table_key, record_id = parts
-        result = apply_decision(decision, table_key, record_id)
-        print("Decision result:", result)
+        for update in updates:
+            handle_update(update)
+            processed += 1
+            offset = update["update_id"] + 1
 
-        tg("answerCallbackQuery", callback_query_id=callback["id"], text=result)
-        message = callback.get("message", {})
-        tg(
-            "editMessageText",
-            chat_id=message.get("chat", {}).get("id"),
-            message_id=message.get("message_id"),
-            text=(message.get("text", "") + f"\n\n— {result}"),
-        )
-
-    # Confirm processed updates so the next run does not see them again.
-    if max_update_id is not None:
-        tg("getUpdates", offset=max_update_id + 1, allowed_updates=["message", "callback_query"])
-
-    return len(updates)
+    return processed
 
 
 # --------------------------------------------------- send approval cards ---
