@@ -140,7 +140,64 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
     return f"Уже обработано (статус: {status})."
 
 
+# Card tag like [c:recXXXXXXXXXXXXXX] (content) / [v:rec...] (visual) —
+# embedded in every card so a text REPLY can be matched back to the record.
+TAG_RE = re.compile(r"\[(c|v):(rec[A-Za-z0-9]{14})\]")
+
+CONTENT_WORDS = {
+    "пост": "post", "post": "post",
+    "рилс": "reel", "рил": "reel", "reel": "reel",
+    "карусель": "carousel", "carousel": "carousel",
+    "да": "y", "yes": "y", "ок": "y", "ok": "y", "+": "y",
+    "нет": "n", "no": "n", "отмена": "n", "-": "n",
+}
+VISUAL_WORDS = {
+    "да": "y", "yes": "y", "ок": "y", "ok": "y", "+": "y",
+    "нет": "n", "no": "n", "отмена": "n", "-": "n",
+}
+
+
+def handle_text_reply(msg: dict) -> None:
+    """A text message: if it is a REPLY to one of our cards, apply the word."""
+    text = (msg.get("text") or "").strip().lower().rstrip(".!")
+    if not text:
+        return
+
+    reply_to = msg.get("reply_to_message") or {}
+    tag = TAG_RE.search(reply_to.get("text") or "")
+
+    if not tag:
+        # A bare command word without replying to a card — explain once.
+        if text in CONTENT_WORDS or text in VISUAL_WORDS:
+            tg("sendMessage", chat_id=msg.get("chat", {}).get("id"),
+               text="Чтобы я понял, к какой карточке это относится — ответь этим словом на саму карточку (свайп влево → «Ответить»).")
+        return
+
+    kind, record_id = tag.groups()
+    table_key = "content" if kind == "c" else "visual"
+    words = CONTENT_WORDS if table_key == "content" else VISUAL_WORDS
+    decision = words.get(text)
+
+    chat_id = msg.get("chat", {}).get("id")
+    if not decision:
+        options = "пост / рилс / карусель / нет" if table_key == "content" else "да / нет"
+        tg("sendMessage", chat_id=chat_id,
+           reply_to_message_id=msg.get("message_id"),
+           text=f"Не понял «{text}». Ответь одним словом: {options}")
+        return
+
+    result = apply_decision(decision, table_key, record_id)
+    print("Text decision:", text, "->", result)
+    tg("sendMessage", chat_id=chat_id,
+       reply_to_message_id=msg.get("message_id"), text=result)
+
+
 def handle_update(update: dict) -> None:
+    message = update.get("message")
+    if message:
+        handle_text_reply(message)
+        return
+
     callback = update.get("callback_query")
     if not callback:
         return
@@ -214,9 +271,11 @@ def process_updates() -> int:
 
 # --------------------------------------------------- send approval cards ---
 
-def send_card(text: str, keyboard_rows: list) -> None:
-    tg("sendMessage", chat_id=CHAT_ID, text=text,
-       reply_markup={"inline_keyboard": keyboard_rows})
+def send_card(text: str, keyboard_rows: list = None) -> None:
+    params = {"chat_id": CHAT_ID, "text": text}
+    if keyboard_rows:
+        params["reply_markup"] = {"inline_keyboard": keyboard_rows}
+    tg("sendMessage", **params)
 
 
 def extract_urls(text: str) -> list:
@@ -234,20 +293,14 @@ def notify_pending() -> int:
         title = sel(fields, "Title") or "Без названия"
         hook = sel(fields, "HOOK")
         caption = (sel(fields, "Final Caption") or "")[:500]
+        rid = record["id"]
         text = (
             f"🆕 Новая тема на согласование\n\n{title}\n\n{hook}\n\n{caption}\n\n"
-            f"В каком формате развить?"
+            f"💬 Ответь на ЭТО сообщение одним словом (свайп → «Ответить»):\n"
+            f"пост / рилс / карусель / нет\n\n"
+            f"[c:{rid}]"
         )
-        rid = record["id"]
-        keyboard = [
-            [
-                {"text": "📝 Post", "callback_data": f"post|content|{rid}"},
-                {"text": "🎬 Reel Idea", "callback_data": f"reel|content|{rid}"},
-                {"text": "🖼 Carousel", "callback_data": f"carousel|content|{rid}"},
-            ],
-            [{"text": "❌ Нет", "callback_data": f"n|content|{rid}"}],
-        ]
-        send_card(text, keyboard)
+        send_card(text)
         at_update(CONTENT_TABLE, record["id"], {NOTIFIED_FIELD: "Needs Review"})
         sent += 1
 
@@ -265,23 +318,23 @@ def notify_pending() -> int:
             continue
 
         job_title = sel(fields, "Job Title") or "Без названия"
+        rid = record["id"]
+        footer = (
+            f"💬 Ответь на ЭТО сообщение (свайп → «Ответить»): да / нет\n\n"
+            f"[v:{rid}]"
+        )
         if status == "Brief Ready":
             preview = (sel(fields, "Final Reel Caption") or sel(fields, "Slide Copy") or "")[:600]
             text = (
                 f"📝 Тексты/промпты готовы ({fmt})\n\n{job_title}\n\n{preview}\n\n"
-                f"Утвердить и запустить генерацию визуала?"
+                f"Утвердить и запустить генерацию визуала?\n\n{footer}"
             )
         else:
             urls = extract_urls(sel(fields, "Output Links"))
             links = "\n".join(urls[:8]) if urls else "(ссылки — в карточке Airtable)"
-            text = f"🖼 Визуал готов ({fmt})\n\n{job_title}\n\nПосмотри и утверди:\n{links}"
+            text = f"🖼 Визуал готов ({fmt})\n\n{job_title}\n\nПосмотри и утверди:\n{links}\n\n{footer}"
 
-        rid = record["id"]
-        keyboard = [[
-            {"text": "✅ Да", "callback_data": f"y|visual|{rid}"},
-            {"text": "❌ Нет", "callback_data": f"n|visual|{rid}"},
-        ]]
-        send_card(text, keyboard)
+        send_card(text)
         at_update(VISUAL_TABLE, record["id"], {NOTIFIED_FIELD: status})
         sent += 1
 
