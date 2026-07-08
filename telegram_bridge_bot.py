@@ -22,6 +22,7 @@ update queue, so no extra database is needed.
 
 import os
 import re
+import time
 from urllib.parse import quote
 
 import requests
@@ -61,29 +62,53 @@ def at_headers(write: bool = False) -> dict:
     return headers
 
 
+def at_request(method: str, url: str, **kwargs):
+    """Airtable call with retries: the API occasionally stalls past 30s, and a
+    single hiccup must not crash the whole bridge run (updates are re-read on
+    the next run anyway). 3 attempts, 60s timeout, 5s pause between."""
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            return requests.request(method, url, timeout=60, **kwargs)
+        except requests.RequestException as exc:
+            last_error = exc
+            print(f"Airtable {method} attempt {attempt}/3 failed: {exc!r}")
+            time.sleep(5)
+    print("Airtable unavailable after retries:", repr(last_error))
+    return None
+
+
 def at_list(table: str, formula: str) -> list:
-    response = requests.get(
-        at_url(table), headers=at_headers(),
-        params={"filterByFormula": formula, "pageSize": 50}, timeout=30,
+    response = at_request(
+        "GET", at_url(table), headers=at_headers(),
+        params={"filterByFormula": formula, "pageSize": 50},
     )
-    if response.status_code != 200:
-        print("Airtable list failed:", table, response.status_code, response.text[:300])
+    if response is None or response.status_code != 200:
+        print("Airtable list failed:", table,
+              getattr(response, "status_code", "no-response"))
         return []
     return response.json().get("records", [])
 
 
 def at_get(table: str, record_id: str):
-    response = requests.get(f"{at_url(table)}/{record_id}", headers=at_headers(), timeout=30)
-    return response.json() if response.status_code == 200 else None
+    """Returns the record dict, the string "missing" for a 4xx (deleted), or
+    None when Airtable is unreachable (caller must NOT treat as missing)."""
+    response = at_request("GET", f"{at_url(table)}/{record_id}", headers=at_headers())
+    if response is None:
+        return None
+    if response.status_code != 200:
+        return "missing"
+    return response.json()
 
 
 def at_update(table: str, record_id: str, fields: dict) -> bool:
-    response = requests.patch(
-        f"{at_url(table)}/{record_id}", headers=at_headers(write=True),
-        json={"fields": fields, "typecast": True}, timeout=30,
+    response = at_request(
+        "PATCH", f"{at_url(table)}/{record_id}", headers=at_headers(write=True),
+        json={"fields": fields, "typecast": True},
     )
-    print("Airtable update:", table, record_id, fields, "->", response.status_code)
-    return response.status_code in (200, 201)
+    status = getattr(response, "status_code", "no-response")
+    print("Airtable update:", table, record_id, fields, "->", status)
+    return response is not None and response.status_code in (200, 201)
 
 
 def sel(fields: dict, key: str) -> str:
@@ -102,7 +127,11 @@ def format_of(fields: dict) -> str:
 def apply_decision(decision: str, table_key: str, record_id: str) -> str:
     table = CONTENT_TABLE if table_key == "content" else VISUAL_TABLE
     record = at_get(table, record_id)
-    if not record:
+    if record is None:
+        # Airtable outage: crash the run WITHOUT confirming this update, so
+        # the decision is retried on the next scheduled run instead of lost.
+        raise RuntimeError("Airtable unreachable — decision will be retried next run.")
+    if record == "missing":
         return "Запись не найдена."
     fields = record.get("fields", {})
 
