@@ -20,6 +20,7 @@ State is kept in Airtable ("TG Notified Status" per record) + Telegram's own
 update queue, so no extra database is needed.
 """
 
+import hashlib
 import os
 import re
 import time
@@ -311,6 +312,30 @@ def extract_urls(text: str) -> list:
     return re.findall(r"https?://[^\s|]+", text or "")
 
 
+def gate_fingerprint(fields: dict, status: str) -> str:
+    """
+    The "already asked" marker: gate status + a short hash of the editable
+    content. Rule: a record sitting at a gate untouched is never re-sent, but
+    ANY edit by the owner (rewriting a rejected topic and re-queueing it)
+    changes the hash, so the bridge asks again.
+
+    NOTIFIED_FIELD itself is deliberately not part of the hash — otherwise
+    writing the marker would change it and the card would re-send forever.
+    """
+    payload = "|".join([
+        status,
+        sel(fields, "Title"),
+        sel(fields, "HOOK"),
+        sel(fields, "Final Caption"),
+        sel(fields, "Job Title"),
+        sel(fields, "Final Reel Caption"),
+        sel(fields, "Slide Copy"),
+        format_of(fields),
+    ])
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
+    return f"{status}|{digest}"
+
+
 def clear_stale_markers() -> int:
     """
     Wipe the "already asked" marker from records that have moved past a gate.
@@ -339,7 +364,8 @@ def notify_pending() -> int:
     # Content Inbox — new topics awaiting review.
     for record in at_list(CONTENT_TABLE, "{Status}='Needs Review'"):
         fields = record["fields"]
-        if sel(fields, NOTIFIED_FIELD) == "Needs Review":
+        fingerprint = gate_fingerprint(fields, "Needs Review")
+        if sel(fields, NOTIFIED_FIELD) == fingerprint:
             continue
         title = sel(fields, "Title") or "Без названия"
         hook = sel(fields, "HOOK")
@@ -352,7 +378,7 @@ def notify_pending() -> int:
             f"[c:{rid}]"
         )
         send_card(text)
-        at_update(CONTENT_TABLE, record["id"], {NOTIFIED_FIELD: "Needs Review"})
+        at_update(CONTENT_TABLE, record["id"], {NOTIFIED_FIELD: fingerprint})
         sent += 1
 
     # Visual Jobs — brief review (reels/posts) + generated-visual review.
@@ -365,7 +391,8 @@ def notify_pending() -> int:
         # Carousel "Brief Ready" is auto-processed — not a human gate.
         if status == "Brief Ready" and not ("reel" in fmt or fmt == "post"):
             continue
-        if sel(fields, NOTIFIED_FIELD) == status:
+        fingerprint = gate_fingerprint(fields, status)
+        if sel(fields, NOTIFIED_FIELD) == fingerprint:
             continue
 
         job_title = sel(fields, "Job Title") or "Без названия"
@@ -386,7 +413,7 @@ def notify_pending() -> int:
             text = f"🖼 Визуал готов ({fmt})\n\n{job_title}\n\nПосмотри и утверди:\n{links}\n\n{footer}"
 
         send_card(text)
-        at_update(VISUAL_TABLE, record["id"], {NOTIFIED_FIELD: status})
+        at_update(VISUAL_TABLE, record["id"], {NOTIFIED_FIELD: fingerprint})
         sent += 1
 
     return sent
