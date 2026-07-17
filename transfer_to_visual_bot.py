@@ -124,12 +124,21 @@ def visual_job_already_exists(content_record_id: str, title: str) -> bool:
         return False
 
     records = response.json().get("records", [])
+    target = normalize_title(title)
 
     if records:
-        return True
+        # A Content Inbox row gets REUSED: the owner rewrites a rejected/old
+        # row into a brand-new topic and re-queues it. So an existing Visual
+        # Job for this row only counts as a duplicate when it is for the SAME
+        # topic — otherwise the rewritten topic deserves its own Visual Job.
+        for record in records:
+            existing_title = record.get("fields", {}).get("Source Post Title", "")
+            if normalize_title(existing_title) == target:
+                return True
+        print("Row reused: existing Visual Job belongs to a previous topic — creating a new one.")
+        return False
 
     # Secondary client-side check by normalised title.
-    target = normalize_title(title)
 
     title_check_url = airtable_table_url(VISUAL_TABLE_NAME)
     title_response = requests.get(
