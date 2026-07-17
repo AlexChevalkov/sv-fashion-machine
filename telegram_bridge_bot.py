@@ -311,6 +311,28 @@ def extract_urls(text: str) -> list:
     return re.findall(r"https?://[^\s|]+", text or "")
 
 
+def clear_stale_markers() -> int:
+    """
+    Wipe the "already asked" marker from records that have moved past a gate.
+
+    Without this, a record that LEAVES a gate and later RETURNS to the same
+    status (owner re-opens a rejected topic, or reuses the row for a new one)
+    keeps its old marker, it matches the status again, and the card is never
+    re-sent — the record hangs silently forever.
+    """
+    cleared = 0
+    targets = (
+        (CONTENT_TABLE, f"AND({{{NOTIFIED_FIELD}}} != '', {{Status}} != 'Needs Review')"),
+        (VISUAL_TABLE, f"AND({{{NOTIFIED_FIELD}}} != '', {{Visual Status}} != 'Brief Ready',"
+                       f" {{Visual Status}} != 'Needs Visual Review')"),
+    )
+    for table, formula in targets:
+        for record in at_list(table, formula):
+            at_update(table, record["id"], {NOTIFIED_FIELD: ""})
+            cleared += 1
+    return cleared
+
+
 def notify_pending() -> int:
     sent = 0
 
@@ -372,6 +394,7 @@ def notify_pending() -> int:
 
 def main() -> None:
     print("Telegram bridge started.")
+    print("Stale markers cleared:", clear_stale_markers())
     processed = process_updates()
     print("Processed Telegram updates:", processed)
     sent = notify_pending()
