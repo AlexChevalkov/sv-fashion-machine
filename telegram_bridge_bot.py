@@ -165,6 +165,20 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
         if decision == "y":
             at_update(table, record_id, {"Visual Status": "Approved Visual"})
             return "✅ Визуал утверждён → Approved Visual."
+        if decision.startswith("redo:"):
+            slides = decision.split(":", 1)[1]
+            # Only carousels have per-slide prompts to re-render from; the reel
+            # pipeline works in keyframes and has its own gate.
+            if "carousel" not in fmt:
+                return "Переделка отдельных слайдов пока работает только для каруселей."
+            at_update(table, record_id, {
+                "Visual Status": "Redo Slides",
+                "Redo Slides": slides,
+            })
+            return (
+                f"🔁 Перерисую слайды {slides.replace(',', ', ')}. "
+                f"Остальные остаются как есть — пришлю новую карточку."
+            )
         return "❌ Отклонено. Поправь визуал в Airtable."
 
     return f"Уже обработано (статус: {status})."
@@ -185,6 +199,20 @@ VISUAL_WORDS = {
     "да": "y", "yes": "y", "ок": "y", "ok": "y", "+": "y",
     "нет": "n", "no": "n", "отмена": "n", "-": "n",
 }
+
+
+def parse_slide_numbers(text: str) -> list:
+    """
+    Slide numbers in a free-form reply, capped at 20 so a stray year or price
+    pasted into the chat is not read as a re-render request. The production bot
+    validates them again against the actual slide count.
+    """
+    numbers = []
+    for token in re.findall(r"\d+", text or ""):
+        number = int(token)
+        if 1 <= number <= 20 and number not in numbers:
+            numbers.append(number)
+    return sorted(numbers)
 
 
 def handle_text_reply(msg: dict) -> None:
@@ -208,12 +236,23 @@ def handle_text_reply(msg: dict) -> None:
     words = CONTENT_WORDS if table_key == "content" else VISUAL_WORDS
     decision = words.get(text)
 
+    # On a visual card, a reply carrying slide numbers ("2 5", "переделать 2 и
+    # 5") means: keep the rest, render these again. Numbers are meaningless on
+    # a content card, so this is deliberately visual-only.
+    if not decision and table_key == "visual":
+        slides = parse_slide_numbers(text)
+        if slides:
+            decision = "redo:" + ",".join(str(n) for n in slides)
+
     chat_id = msg.get("chat", {}).get("id")
     if not decision:
-        options = "пост / рилс / карусель / нет" if table_key == "content" else "да / нет"
+        options = (
+            "пост / рилс / карусель / нет" if table_key == "content"
+            else "да / нет / номера слайдов на переделку (например: 2 5)"
+        )
         tg("sendMessage", chat_id=chat_id,
            reply_to_message_id=msg.get("message_id"),
-           text=f"Не понял «{text}». Ответь одним словом: {options}")
+           text=f"Не понял «{text}». Ответь: {options}")
         return
 
     result = apply_decision(decision, table_key, record_id)
@@ -330,6 +369,12 @@ def gate_fingerprint(fields: dict, status: str) -> str:
         sel(fields, "Job Title"),
         sel(fields, "Final Reel Caption"),
         sel(fields, "Slide Copy"),
+        # Re-rendered slides change nothing in the texts above, so without this
+        # a job coming back from "Redo Slides" could match its own pre-redo
+        # fingerprint and never get a fresh card. clear_stale_markers() usually
+        # wipes the marker while the job is away from the gate, but that is a
+        # race against the production bot — this makes it deterministic.
+        sel(fields, "Output Links"),
         format_of(fields),
     ])
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
@@ -410,6 +455,14 @@ def notify_pending() -> int:
         else:
             urls = extract_urls(sel(fields, "Output Links"))
             links = "\n".join(urls[:8]) if urls else "(ссылки — в карточке Airtable)"
+            if "carousel" in fmt:
+                footer = (
+                    f"💬 Ответь на ЭТО сообщение (свайп → «Ответить»):\n"
+                    f"да — утвердить\n"
+                    f"номера слайдов (например: 2 5) — перерисовать только их\n"
+                    f"нет — править руками в Airtable\n\n"
+                    f"[v:{rid}]"
+                )
             text = f"🖼 Визуал готов ({fmt})\n\n{job_title}\n\nПосмотри и утверди:\n{links}\n\n{footer}"
 
         send_card(text)

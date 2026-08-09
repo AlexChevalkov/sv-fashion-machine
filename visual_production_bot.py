@@ -87,6 +87,7 @@ STATUS_APPROVED = "Approved Visual"
 STATUS_NEEDS_TEXT_REVIEW = "Needs Text Review"
 STATUS_APPROVED_TEXT = "Approved Text"
 STATUS_READY_FOR_BUFFER = "Ready for Buffer"
+STATUS_REDO_SLIDES = "Redo Slides"
 STATUS_ERROR = "Failed"
 
 
@@ -231,6 +232,8 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
                                and approved the keyframe prompts and count).
       - 'Approved Visual'   -> reel motion / carousel overlay.
       - 'Approved Text'     -> finalize (sound, caption / ready for buffer).
+      - 'Redo Slides'       -> re-render only the carousel slides listed in the
+                               'Redo Slides' field, then back to review.
       - 'Brief Ready' for CAROUSELS only -> generate raw carousel images.
 
     Reels at 'Brief Ready' are intentionally NOT fetched: that is the review
@@ -247,6 +250,7 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
         "{Visual Status}='Prompts Approved',"
         "{Visual Status}='Approved Visual',"
         "{Visual Status}='Approved Text',"
+        "{Visual Status}='Redo Slides',"
         "AND("
         "{Visual Status}='Brief Ready',"
         "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format})),"
@@ -572,8 +576,27 @@ def extract_krea_raw_items_from_output_links(output_links: str) -> List[Dict[str
 
     items.sort(key=lambda item: int(item["slide"]))
 
-    return items    
-    
+    return items
+
+
+def parse_redo_slide_numbers(value: Any, slide_count: int) -> List[int]:
+    """
+    Slide numbers the owner asked to re-render, taken from the 'Redo Slides'
+    field. Written by the Telegram bridge from a free-form reply, so accept
+    anything number-shaped: "2 5", "2,5", "переделать 2 и 5".
+
+    Out-of-range and duplicate numbers are dropped rather than raising — a
+    typo in Telegram must not park the job at Failed.
+    """
+    numbers: List[int] = []
+
+    for token in re.findall(r"\d+", str(value or "")):
+        number = int(token)
+        if 1 <= number <= slide_count and number not in numbers:
+            numbers.append(number)
+
+    return sorted(numbers)
+
 def parse_slide_copy_for_generation(
     slide_copy: str,
     slide_count: int,
@@ -4101,6 +4124,121 @@ def process_record(record: Dict[str, Any]) -> None:
                 )
 
                 raise
+
+    # CAROUSEL: RE-RENDER ONLY THE SLIDES THE OWNER REJECTED
+    #
+    # The review gate in Telegram is all-or-nothing by default. When the owner
+    # answers with slide numbers instead of "да", the bridge parks them here so
+    # the good slides survive: their Krea images stay exactly as approved and
+    # only the listed ones are generated again.
+    if status_value == STATUS_REDO_SLIDES:
+        existing_items = extract_krea_raw_items_from_output_links(output_links_value)
+        slide_count = len(existing_items)
+        redo_numbers = parse_redo_slide_numbers(
+            safe_get(fields, "Redo Slides"), slide_count
+        )
+
+        if not existing_items or not redo_numbers:
+            reason = (
+                "no Krea raw images in Output Links"
+                if not existing_items
+                else f"no usable slide numbers in {safe_get(fields, 'Redo Slides')!r}"
+            )
+            print(f"Redo Slides skipped: {reason}. Returning to review.")
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_NEEDS_REVIEW,
+                    "Redo Slides": "",
+                    "Render Notes": append_note(
+                        safe_get(fields, "Render Notes", ""),
+                        f"Redo request ignored at {now_iso()}: {reason}.",
+                    ),
+                },
+            )
+            return
+
+        try:
+            update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
+
+            krea_prompts = parse_generated_carousel_prompts(
+                fields=fields,
+                slide_count=slide_count,
+            )
+
+            raw_dir = OUTPUT_DIR / record_id / "raw"
+            ensure_dir(raw_dir)
+
+            items_by_slide = {int(item["slide"]): dict(item) for item in existing_items}
+
+            # New R2 key per attempt. Overwriting the old key would leave the
+            # previous image in Cloudflare's edge cache, and the review card in
+            # Telegram would show the picture that was just rejected.
+            version = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+
+            for slide_num in redo_numbers:
+                prompt = krea_prompts[slide_num - 1]
+
+                print(f"Re-rendering slide {slide_num}/{slide_count}")
+                print("Prompt:", prompt)
+
+                job_id = create_krea_image_job(
+                    prompt=prompt,
+                    aspect_ratio=KREA_ASPECT_RATIO,
+                )
+
+                url = poll_krea_job(job_id)
+
+                raw_path = raw_dir / f"slide_{slide_num:02d}_raw.png"
+                download_image(url, raw_path)
+
+                permanent_url = mirror_to_r2(
+                    raw_path,
+                    f"bot-output/{build_job_r2_folder(record)}"
+                    f"/carousel/slide_{slide_num:02d}_v{version}.png",
+                    url,
+                )
+
+                items_by_slide[slide_num] = {
+                    "slide": str(slide_num),
+                    "url": permanent_url,
+                    "job_id": job_id,
+                }
+
+            raw_items = [items_by_slide[num] for num in sorted(items_by_slide)]
+
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_NEEDS_REVIEW,
+                    "Output Links": build_output_links_text(raw_items, []),
+                    "Redo Slides": "",
+                    "Render Notes": append_note(
+                        safe_get(fields, "Render Notes", ""),
+                        f"Re-rendered slides {', '.join(str(n) for n in redo_numbers)} "
+                        f"at {now_iso()}. Other slides kept as approved.",
+                    ),
+                },
+            )
+
+            print("Slides re-rendered:", redo_numbers, "-> Needs Visual Review.")
+            return
+
+        except Exception as error:
+            print("ERROR while re-rendering slides:", error)
+
+            update_airtable_record(
+                record_id,
+                {
+                    "Visual Status": STATUS_ERROR,
+                    "Render Notes": append_note(
+                        safe_get(fields, "Render Notes", ""),
+                        f"Slide re-render failed at {now_iso()}:\n{str(error)}",
+                    ),
+                },
+            )
+
+            raise
 
     # CAROUSEL RAW IMAGE GENERATION
     if status_value != STATUS_BRIEF_READY:

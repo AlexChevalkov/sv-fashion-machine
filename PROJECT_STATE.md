@@ -33,6 +33,9 @@
 
 2. Visual Jobs:
    - `Needs Visual Review` → choose frames / fill Selected Frame Order → `Approved Visual`
+   - `Needs Visual Review`, carousels only → reply to the Telegram card with
+     slide numbers ("2 5") instead of "да" → `Redo Slides` → only those slides
+     are rendered again, the approved ones are kept → `Needs Visual Review`
 
 3. Visual Jobs:
    - `Needs Text Review` → edit Overlay Script / title / caption → `Approved Text`
@@ -43,6 +46,10 @@
 Approved records are picked up by `transfer_to_visual_bot.py`.
 
 ### Visual Jobs / Queue
+Note: `visual_production_bot.py` selects records by `filterByFormula`, not by
+this view, so a new actionable status (e.g. `Redo Slides`) needs no view edit —
+only an entry in that formula.
+
 Must include:
 - `Brief Ready`
 - `Approved Visual`
