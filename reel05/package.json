@@ -1,0 +1,27 @@
+{
+  "name": "reel05",
+  "version": "1.0.0",
+  "description": "Рил 05 — текстовый рилс с эффектом печатной машинки",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.507",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.507",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "fonts": "node scripts/make-font-data.mjs",
+    "studio": "npm run fonts && remotion studio",
+    "render": "npm run fonts && remotion render Reel05"
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}

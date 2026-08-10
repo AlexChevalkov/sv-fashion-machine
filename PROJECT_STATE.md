@@ -26,6 +26,15 @@
      - `Approved Visual` → motion / assembly / text preview → `Needs Text Review`
      - `Approved Text` → final text / sound / cover / caption → `Ready for Buffer`
 
+5. `reel05_bot.py` — ветка «Рил 05», эксперимент.
+   - Reads Visual Jobs records with `Visual Status = Reel 05`.
+   - Takes the finished post text, splits it into screens, renders a vertical
+     typewriter reel with Remotion (`reel05/`), uploads it to R2 and creates a
+     Buffer draft.
+   - Output status: `Sent for Buffer`, or `Ready for Buffer` if Buffer refused.
+   - Deliberately separate from the rest: own status, own workflow, own script,
+     so it cannot break posts, carousels or reels.
+
 ## Manual review points
 
 1. Content Inbox:
