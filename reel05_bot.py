@@ -9,8 +9,10 @@
 у неё свой статус, свой запуск и свой скрипт, так что сломать ею
 работающие посты, карусели и рилсы нельзя.
 
-Как запускается:
-    Visual Jobs → Visual Status = "Reel 05"
+Как запускается — двумя способами:
+    1. Visual Jobs → Visual Status = "Reel 05" (руками, для старых постов).
+    2. Ответ «да+рил» на карточку поста в Телеграме: мост ставит галочку
+       "Рил 05", и бот забирает карточку, когда пост дособран.
 
 Что делает дальше:
     успех  → "Sent for Buffer" (черновик в Buffer)
@@ -39,6 +41,8 @@ AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 VISUAL_TABLE = os.environ.get("AIRTABLE_VISUAL_TABLE_NAME", "Visual Jobs")
 
 STATUS_TRIGGER = "Reel 05"
+# Галочка, которую ставит телеграм-мост по ответу «да+рил» на карточку поста.
+REEL05_FLAG = "Рил 05"
 STATUS_SENT = "Sent for Buffer"
 STATUS_MANUAL = "Ready for Buffer"
 
@@ -75,13 +79,23 @@ def airtable_headers(write: bool = False) -> dict:
 
 
 def fetch_queued_jobs(limit: int = 1) -> list:
+    # Два входа в ветку:
+    #   1. Статус "Reel 05" — поставлен руками. Так пересобираются старые
+    #      посты, по которым карточка в Телеграме давно не придёт.
+    #   2. Галочка "Рил 05" — поставлена мостом по ответу «да+рил». Ждём,
+    #      пока пост дособран: текст рилса берётся из готового поста.
+    formula = (
+        f"OR("
+        f"{{Visual Status}}='{STATUS_TRIGGER}',"
+        f"AND({{{REEL05_FLAG}}},"
+        f" OR({{Visual Status}}='{STATUS_SENT}',{{Visual Status}}='{STATUS_MANUAL}'))"
+        f")"
+    )
+
     response = requests.get(
         airtable_url(),
         headers=airtable_headers(),
-        params={
-            "maxRecords": limit,
-            "filterByFormula": f"{{Visual Status}}='{STATUS_TRIGGER}'",
-        },
+        params={"maxRecords": limit, "filterByFormula": formula},
         timeout=30,
     )
     print("Read Visual Jobs status:", response.status_code)
@@ -303,12 +317,14 @@ def process(record: dict) -> None:
     if ok:
         update_job(record_id, {
             "Visual Status": STATUS_SENT,
+            REEL05_FLAG: False,
             "Output Links": f"Рил 05 собран: {video_url}\nGenerated at: {now_iso()}",
             "Render Notes": notes + f"\n\n---\n\nРил 05: {len(slides)} экранов. {info}",
         })
     else:
         update_job(record_id, {
             "Visual Status": STATUS_MANUAL,
+            REEL05_FLAG: False,
             "Output Links": f"Рил 05 собран: {video_url}\nGenerated at: {now_iso()}",
             "Render Notes": notes + f"\n\n---\n\nРил 05 собран, но черновик в Buffer "
                                     f"не создан ({info}). Выложи вручную из ссылки выше.",
@@ -333,6 +349,7 @@ def main() -> None:
         print("ОШИБКА:", repr(error))
         update_job(record_id, {
             "Visual Status": STATUS_MANUAL,
+            REEL05_FLAG: False,
             "Render Notes": f"Рил 05 не собрался {now_iso()}:\n{error}",
         })
         raise

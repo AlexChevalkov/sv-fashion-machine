@@ -155,9 +155,23 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
     fmt = format_of(fields)
 
     if status == "Brief Ready":
-        if decision == "y":
+        if decision in ("y", "y+reel05"):
             target = "Approved Visual" if fmt == "post" else "Prompts Approved"
-            at_update(table, record_id, {"Visual Status": target})
+            fields_to_write = {"Visual Status": target}
+
+            # Текстовый рилс собирается из готового текста поста, поэтому
+            # здесь только отмечаем намерение: reel05_bot заберёт карточку
+            # сам, когда пост дособран.
+            if decision == "y+reel05":
+                if fmt != "post":
+                    return ("Текстовый рилс делается только из постов. "
+                            "Ответь «да», чтобы просто утвердить.")
+                fields_to_write[REEL05_FIELD] = True
+
+            at_update(table, record_id, fields_to_write)
+
+            if decision == "y+reel05":
+                return f"✅ Утверждено → {target}. После поста соберу текстовый рилс."
             return f"✅ Утверждено → {target}."
         return "❌ Отклонено. Поправь тексты/промпты в Airtable."
 
@@ -198,7 +212,14 @@ CONTENT_WORDS = {
 VISUAL_WORDS = {
     "да": "y", "yes": "y", "ок": "y", "ok": "y", "+": "y",
     "нет": "n", "no": "n", "отмена": "n", "-": "n",
+    # Пост + текстовый рилс из того же текста (ветка Рил 05). Собрать рилс
+    # можно только когда текст уже написан, поэтому решение принимается здесь,
+    # на гейте готовых текстов, а не при согласовании темы.
+    "да+рил": "y+reel05", "да+рил05": "y+reel05", "да+рилс": "y+reel05",
+    "да+05": "y+reel05", "+рил": "y+reel05",
 }
+
+REEL05_FIELD = "Рил 05"
 
 
 def parse_slide_numbers(text: str) -> list:
@@ -220,6 +241,12 @@ def handle_text_reply(msg: dict) -> None:
     text = (msg.get("text") or "").strip().lower().rstrip(".!")
     if not text:
         return
+
+    # «да + рил 05» и «да+рил05» — один и тот же ответ. Схлопываем пробелы,
+    # иначе вариант с пробелами не найдётся в словаре и цифры из него уедут
+    # в разбор номеров слайдов.
+    text = re.sub(r"\s*\+\s*", "+", text)
+    text = re.sub(r"(?<=[а-яё])\s+(?=\d)", "", text)
 
     reply_to = msg.get("reply_to_message") or {}
     tag = TAG_RE.search(reply_to.get("text") or "")
@@ -483,6 +510,16 @@ def notify_pending(content_records: list, visual_records: list) -> int:
         )
         if status == "Brief Ready":
             preview = (sel(fields, "Final Reel Caption") or sel(fields, "Slide Copy") or "")[:600]
+            # Текстовый рилс собирается из текста поста, поэтому предлагается
+            # только постам и только здесь — раньше текста ещё нет.
+            if fmt == "post":
+                footer = (
+                    f"💬 Ответь на ЭТО сообщение (свайп → «Ответить»):\n"
+                    f"да — только карточки\n"
+                    f"да+рил — карточки, и следом текстовый рилс\n"
+                    f"нет — править руками\n\n"
+                    f"[v:{rid}]"
+                )
             text = (
                 f"📝 Тексты/промпты готовы ({fmt})\n\n{job_title}\n\n{preview}\n\n"
                 f"Утвердить и запустить генерацию визуала?\n\n{footer}"
