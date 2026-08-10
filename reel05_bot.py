@@ -113,10 +113,29 @@ def field(fields: dict, name: str, default: str = "") -> str:
 
 # ------------------------------------------------------------ текст → экраны ---
 
+# Кусок, который не может начинать предложение: закрывающая кавычка или
+# скобка, знак препинания, строчная буква. Такой хвост приклеивается обратно.
+CONTINUATION_RE = re.compile(r'^[»"\'\)\],;:—–-]|^[a-zа-яё]')
+
+
 def split_sentences(text: str) -> list:
-    """Режет абзац по границам предложений, сохраняя знак в конце."""
-    parts = re.split(r"(?<=[.!?…])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    """
+    Режет абзац по границам предложений, сохраняя знак в конце.
+
+    Точка внутри кавычек или сокращения границей предложения не является,
+    поэтому куски, которые заведомо не могут начинать фразу, приклеиваются
+    обратно к предыдущему. Без этого прямая речь рвётся между экранами:
+    на живом материале экран начинался с обрывка «Вот это", сказанное…».
+    """
+    parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text.strip()) if p.strip()]
+
+    merged = []
+    for part in parts:
+        if merged and CONTINUATION_RE.match(part):
+            merged[-1] = f"{merged[-1]} {part}"
+        else:
+            merged.append(part)
+    return merged
 
 
 def pack_units(units: list, first_budget: int, budget: int) -> list:
