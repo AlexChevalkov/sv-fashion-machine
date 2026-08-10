@@ -259,14 +259,21 @@ def update_content_after_transfer(content_record_id: str, visual_job_id: str, co
 def main() -> None:
     print("Transfer to Visual Bot started:", now_iso())
 
-    content_schema = get_table_schema(CONTENT_TABLE_NAME)
-    visual_schema = get_table_schema(VISUAL_TABLE_NAME)
-
     approved_posts = fetch_approved_content_posts()
 
     if not approved_posts:
         print("No Approved Content Inbox posts found.")
         return
+
+    # Schema is read only once there is something to transfer. It used to be
+    # read on every run, before this check — two wasted requests per run on a
+    # bot that runs every 30 minutes and usually finds nothing, against a base
+    # with a monthly request budget.
+    #
+    # Only the Visual Jobs schema is read: update_content_after_transfer()
+    # writes with typecast and ignores the Content Inbox schema entirely.
+    visual_schema = get_table_schema(VISUAL_TABLE_NAME)
+    content_schema = {}
 
     created_count = 0
     skipped_count = 0
