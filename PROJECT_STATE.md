@@ -27,7 +27,9 @@
      - `Approved Text` → final text / sound / cover / caption → `Ready for Buffer`
 
 5. `reel05_bot.py` — ветка «Рил 05», эксперимент.
-   - Reads Visual Jobs records with `Visual Status = Reel 05`.
+   - Two entry points: `Visual Status = Reel 05` set by hand (for older posts),
+     or the `Рил 05` checkbox set by the Telegram bridge when the owner answers
+     "да+рил" on a Post's brief card — the reel then runs once the post is done.
    - Takes the finished post text, splits it into screens, renders a vertical
      typewriter reel with Remotion (`reel05/`), uploads it to R2 and creates a
      Buffer draft.
