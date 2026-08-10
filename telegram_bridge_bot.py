@@ -381,7 +381,30 @@ def gate_fingerprint(fields: dict, status: str) -> str:
     return f"{status}|{digest}"
 
 
-def clear_stale_markers() -> int:
+def fetch_gate_records() -> tuple:
+    """
+    One query per table, covering BOTH things the bridge reads Airtable for:
+    records sitting at an approval gate (may need a card) and records that
+    have left a gate but still carry a marker (needs clearing).
+
+    Doing those as two separate passes meant four queries every run on a bot
+    that runs every ten minutes — around 570 requests a day, almost all of
+    them finding nothing. That was the single biggest consumer of the base's
+    monthly request budget, and it is what exhausted it on 2026-08-10.
+    """
+    content = at_list(
+        CONTENT_TABLE,
+        f"OR({{Status}}='Needs Review', {{{NOTIFIED_FIELD}}}!='')",
+    )
+    visual = at_list(
+        VISUAL_TABLE,
+        f"OR({{Visual Status}}='Brief Ready', {{Visual Status}}='Needs Visual Review',"
+        f" {{{NOTIFIED_FIELD}}}!='')",
+    )
+    return content, visual
+
+
+def clear_stale_markers(content_records: list, visual_records: list) -> int:
     """
     Wipe the "already asked" marker from records that have moved past a gate.
 
@@ -389,26 +412,37 @@ def clear_stale_markers() -> int:
     status (owner re-opens a rejected topic, or reuses the row for a new one)
     keeps its old marker, it matches the status again, and the card is never
     re-sent — the record hangs silently forever.
+
+    Filtering happens here rather than in the query, so this shares the single
+    fetch from fetch_gate_records() instead of asking Airtable again.
     """
     cleared = 0
-    targets = (
-        (CONTENT_TABLE, f"AND({{{NOTIFIED_FIELD}}} != '', {{Status}} != 'Needs Review')"),
-        (VISUAL_TABLE, f"AND({{{NOTIFIED_FIELD}}} != '', {{Visual Status}} != 'Brief Ready',"
-                       f" {{Visual Status}} != 'Needs Visual Review')"),
-    )
-    for table, formula in targets:
-        for record in at_list(table, formula):
+    gates = {
+        CONTENT_TABLE: ("Status", {"Needs Review"}),
+        VISUAL_TABLE: ("Visual Status", {"Brief Ready", "Needs Visual Review"}),
+    }
+
+    for table, records in ((CONTENT_TABLE, content_records), (VISUAL_TABLE, visual_records)):
+        status_field, gate_statuses = gates[table]
+        for record in records:
+            fields = record.get("fields", {})
+            if not sel(fields, NOTIFIED_FIELD):
+                continue
+            if sel(fields, status_field) in gate_statuses:
+                continue
             at_update(table, record["id"], {NOTIFIED_FIELD: ""})
             cleared += 1
     return cleared
 
 
-def notify_pending() -> int:
+def notify_pending(content_records: list, visual_records: list) -> int:
     sent = 0
 
     # Content Inbox — new topics awaiting review.
-    for record in at_list(CONTENT_TABLE, "{Status}='Needs Review'"):
-        fields = record["fields"]
+    for record in content_records:
+        fields = record.get("fields", {})
+        if sel(fields, "Status") != "Needs Review":
+            continue
         fingerprint = gate_fingerprint(fields, "Needs Review")
         if sel(fields, NOTIFIED_FIELD) == fingerprint:
             continue
@@ -427,10 +461,11 @@ def notify_pending() -> int:
         sent += 1
 
     # Visual Jobs — brief review (reels/posts) + generated-visual review.
-    formula = "OR({Visual Status}='Brief Ready',{Visual Status}='Needs Visual Review')"
-    for record in at_list(VISUAL_TABLE, formula):
-        fields = record["fields"]
+    for record in visual_records:
+        fields = record.get("fields", {})
         status = sel(fields, "Visual Status")
+        if status not in ("Brief Ready", "Needs Visual Review"):
+            continue
         fmt = format_of(fields)
 
         # Carousel "Brief Ready" is auto-processed — not a human gate.
@@ -474,10 +509,22 @@ def notify_pending() -> int:
 
 def main() -> None:
     print("Telegram bridge started.")
-    print("Stale markers cleared:", clear_stale_markers())
+
+    # Read the two tables ONCE and reuse the result for both passes.
+    #
+    # The fetch now happens before decisions are applied, so notify_pending()
+    # works from a snapshot taken a moment earlier. That is safe: a record
+    # whose decision was just applied still carries the marker matching its
+    # card, so it is skipped as "already asked" rather than asked twice. And
+    # no bridge decision ever moves a record INTO a gate, so nothing that
+    # deserves a card this run can be missing from the snapshot.
+    content_records, visual_records = fetch_gate_records()
+    print("Gate records read:", len(content_records), "content,", len(visual_records), "visual")
+
+    print("Stale markers cleared:", clear_stale_markers(content_records, visual_records))
     processed = process_updates()
     print("Processed Telegram updates:", processed)
-    sent = notify_pending()
+    sent = notify_pending(content_records, visual_records)
     print("Approval cards sent:", sent)
     print("Telegram bridge done.")
 
