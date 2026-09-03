@@ -342,7 +342,6 @@ Krea Model Recommendation: "Krea Image", "Nano Banana", "Kling", "Runway", "Veo 
     message = client.messages.create(
     model=MODEL,
     max_tokens=5000,
-    temperature=0.25,
     system=system_prompt,
     messages=[{"role": "user", "content": user_prompt}],
 )
