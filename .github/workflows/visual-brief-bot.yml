@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          pip install anthropic requests pillow
+          pip install -r requirements.txt
 
       - name: Generate Visual Brief
         env:
