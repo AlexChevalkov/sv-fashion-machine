@@ -618,6 +618,47 @@ def filter_unused_evergreen(existing_titles: set[str]) -> list[dict]:
     return unused
 
 
+def repair_truncated_json(text: str) -> str:
+    """
+    Try to close a JSON object that was cut off mid-generation:
+    drop the unfinished tail, then close open strings/brackets.
+    """
+    # Cut the unfinished tail back to the last comma or closing bracket.
+    cut = max(text.rfind(","), text.rfind("}"), text.rfind("]"))
+    if cut > 0:
+        text = text[:cut]
+
+    # Close an unterminated string.
+    quotes = len(re.findall(r'(?<!\\)"', text))
+    if quotes % 2:
+        text += '"'
+
+    # Close the remaining brackets in the right order.
+    stack = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]" and stack:
+            stack.pop()
+
+    for char in reversed(stack):
+        text += "}" if char == "{" else "]"
+
+    return text
+
+
 def extract_json(text: str) -> dict:
     text = text.strip()
 
@@ -628,10 +669,24 @@ def extract_json(text: str) -> dict:
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
 
-    if not match:
-        raise ValueError(f"No JSON object found in Claude response:\n{text}")
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
 
-    return json.loads(match.group(0))
+    # The response was probably truncated by max_tokens. Try to salvage it.
+    start = text.find("{")
+    if start >= 0:
+        repaired = repair_truncated_json(text[start:])
+        try:
+            result = json.loads(repaired)
+            print("WARNING: Claude response was truncated. Repaired JSON was used.")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"No valid JSON object found in Claude response:\n{text}")
 
 
 def build_candidates_text(articles: list[dict]) -> str:
@@ -812,11 +867,20 @@ total_score = expert_angle_score + originality_score + audience_value_score + de
   который можно раскрыть в нужной рубрике.
 - Не повторяй темы из списка уже использованных.
 - Не повторяй финальную эмоцию и вывод последних постов.
+
+ДЛИНА ОТВЕТА. JSON должен быть компактным, иначе он не поместится:
+- rubric_reason: максимум 15 слов;
+- selected_reason: максимум 25 слов;
+- editorial_angle: максимум 30 слов;
+- why_follow_this_account: максимум 20 слов;
+- final_emotion: 2-5 слов;
+- top_rejected: РОВНО 2 элемента, reason не длиннее 12 слов.
+Никакого текста до или после JSON.
 """
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=1600,
+        max_tokens=4000,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
@@ -900,15 +964,15 @@ def generate_card(selected: dict) -> dict:
 Ты — редактор экспертного fashion-медиа @sv_fashionacademy.
 
 Позиционирование:
-Не только тренды. Контекст моды в развитии. Новые идеи в дизайне. Влияние на моду смежных областей дизайна. 
-Архивы, которые вернулись в актуальность, модные показы, бренды, вкус и стиль, модная индустрия и бизнес.
+Не только тренды. Контекст моды в развитии.
+Архивы, показы, бренды, вкус, индустрия.
 
 Авторский тон:
 сухо, умно, точно, без глянцевой восторженности, с юмором и легким троллингом.
 Не продавать курс.
 Не писать как SMM.
-Не использовать слова: икона стиля, роскошь во всей красе, вдохновляемся.
-Давать не пересказ новости, а контекст: почему это важно, что это говорит о бренде, вкусе, индустрии или визуальной культуре. Как повлияет на бизнес.
+Не использовать слова: must-have, икона стиля, роскошь во всей красе, вдохновляемся.
+Давать не пересказ новости, а контекст: почему это важно, что это говорит о бренде, вкусе, индустрии или визуальной культуре.
 Предлагать варианты использования выводов для профессионалов индустрии.
 
 Тон по рубрикам:
@@ -918,13 +982,12 @@ def generate_card(selected: dict) -> dict:
 
 ЯЗЫК. АНТИ-ШАБЛОН. Строго соблюдай стоп-лист:
 
-ЗАПРЕЩЕНО:
+ПОЛНОСТЬЮ ЗАПРЕЩЕНО:
 1. Конструкция «не X, а Y» во всех вариантах:
    «Это не декорация, а визуальный код», «Не про одежду. Про власть.»,
    «Дело не в цене, а в...», «Важно не что, а как».
    Ноль вхождений на текст. Если мысль строится на противопоставлении —
    выражай его через пример, сравнение, историю, цифру или прямое утверждение.
-   Можно использовать в 1 из 10 текстов.
 2. Риторический вопрос с мгновенным ответом:
    «Почему? Потому что...» / «Что это значит? Это значит...»
 3. Триады рубленых фраз: «Точно. Дорого. Навсегда.»
@@ -996,7 +1059,7 @@ def generate_card(selected: dict) -> dict:
 
     message = client.messages.create(
         model=MODEL,
-        max_tokens=1400,
+        max_tokens=2500,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
