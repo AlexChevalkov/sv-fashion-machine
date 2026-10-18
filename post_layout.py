@@ -387,7 +387,8 @@ def render_post_carousel(
     # Подбор: всего карточек ≤ 7, если получается; иначе убираем фото
     # внутри, потом разрешаем больше текстовых карточек.
     size, text_slides = None, None
-    max_total = TARGET_MAX_SLIDES if photos else TARGET_MAX_SLIDES - 1
+    # 7 карточек — только когда есть фото внутри цепочки; иначе до 6.
+    max_total = TARGET_MAX_SLIDES if len(photos) >= 2 else TARGET_MAX_SLIDES - 1
     for n_inline in range(len(inline), -1, -1):
         max_text = max_total - 1 - n_inline
         if max_text < 1:

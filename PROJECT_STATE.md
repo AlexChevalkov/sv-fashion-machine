@@ -37,6 +37,28 @@
    - Deliberately separate from the rest: own status, own workflow, own script,
      so it cannot break posts, carousels or reels.
 
+## Перестройка 2026-10-18 (общие модули)
+
+- `editorial_rules.py` — правила понятности для русскоязычной аудитории и
+  «редактор-адаптатор» (второй проход после автора: поясняет бренды, имена,
+  аббревиатуры, англицизмы; без новых фактов и эмодзи). Используется в
+  `sv_airtable_bot.py` (текст для Content Inbox) и `visual_brief_bot.py`
+  (подпись для не-Post форматов; для Post подпись берётся дословно из
+  одобренного текста).
+- Хэштеги: `normalize_hashtags()` вызывается в `buffer_publish.create_instagram_draft`
+  — для КАЖДОГО черновика не больше 5, `#sv_fashion_media` первым.
+- `photo_editor.py` — реальные фото: картинки статьи-источника, Google
+  Картинки через Serper (`SERPER_API_KEY`, без ключа пропускается),
+  Wikimedia Commons; отбор Claude по картинке; обрезка 4:5 с фокусом;
+  подпись «Фото: источник». Выключить: `PHOTO_EDITOR_ENABLED=0`.
+- `post_layout.py` — вёрстка Post v2: карточки по целым предложениям,
+  ровное заполнение, 5–7 карточек, фото на обложке и внутри цепочки,
+  палитры. Цвет фона — поле Visual Jobs `Post Color` (пусто / «Авто» —
+  чередование).
+- Карусели: сначала реальные фото, Krea генерирует только недостающие слайды.
+- Проверка без записи в Airtable/Buffer: workflow `Rebuild Smoke Test`
+  (`tools/rebuild_smoke_test.py`, вход — ID записей Visual Jobs).
+
 ## Manual review points
 
 1. Content Inbox:
