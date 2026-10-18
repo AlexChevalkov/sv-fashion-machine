@@ -112,7 +112,7 @@ def fetch_telegram(handle: str, max_pages: int = 30):
         messages = soup.select("div.tgme_widget_message[data-post]")
         if not messages:
             break
-        ids, oldest = [], None
+        ids, oldest, newest, dated = [], None, None, 0
         for msg in messages:
             post_id = int(msg["data-post"].split("/")[-1])
             ids.append(post_id)
@@ -121,6 +121,8 @@ def fetch_telegram(handle: str, max_pages: int = 30):
                 continue
             date = datetime.fromisoformat(time_tag["datetime"].replace("Z", "+00:00"))
             oldest = date if oldest is None or date < oldest else oldest
+            newest = date if newest is None or date > newest else newest
+            dated += 1
             views_tag = msg.select_one("span.tgme_widget_message_views")
             text_tag = msg.select_one("div.tgme_widget_message_text")
             text = text_tag.get_text("\n", strip=True) if text_tag else ""
@@ -139,7 +141,13 @@ def fetch_telegram(handle: str, max_pages: int = 30):
                 "comments": 0,
                 "forwarded": forwarded,
             })
-        if oldest and oldest < SINCE:
+        log(f"tg {handle} page: {len(messages)} msgs, {dated} dated, "
+            f"{oldest:%Y-%m-%d} … {newest:%Y-%m-%d}" if newest else f"tg {handle} page: {len(messages)} msgs, no dates")
+        # Останавливаемся, только когда ВСЯ страница старше окна: отдельные
+        # посты со старой датой (репосты, закрепы) не должны обрывать сбор.
+        if newest and newest < SINCE:
+            break
+        if before is not None and min(ids) >= before:
             break
         before = min(ids)
         time.sleep(0.6)
@@ -304,6 +312,7 @@ def score_outliers(posts):
         for p in items:
             p["baseline"] = med
             p["score"] = round(metric(p) / med, 2) if med else 0
+            p["suspect"] = p["score"] >= 15   # такой разрыв часто значит рекламу или посев
     scored = [p for p in eligible if "score" in p]
     return scored, baselines
 
@@ -335,8 +344,9 @@ def analyse(outliers, flops, baselines):
     def pack(items):
         lines = []
         for p in items:
+            flag = " (подозрительно высокий — возможно, пост продвигали рекламой)" if p.get("suspect") else ""
             lines.append(
-                f"- [{p['platform']} @{p['account']}] ×{p['score']} к норме аккаунта "
+                f"- [{p['platform']} @{p['account']}] ×{p['score']}{flag} к норме аккаунта "
                 f"({metric(p)} при норме {int(p['baseline'])}); формат: {p['format']}; {p['url']}\n"
                 f"  Текст: {p['text'][:700].replace(chr(10), ' / ')}"
             )
@@ -359,6 +369,16 @@ def analyse(outliers, flops, baselines):
 Напиши отчёт для владельца аккаунта. Он не аналитик, быстро устаёт — коротко, конкретно, без воды,
 по-русски. Каждый вывод подкрепляй ссылками на посты из списка. Не выдумывай данных, которых нет.
 
+ЖЁСТКИЕ ПРАВИЛА:
+- Не строй вывод на одном посте с подозрительно высоким значением — такие посты часто продвигали
+  рекламой. Вывод — только то, что повторяется у нескольких постов или аккаунтов.
+- Хуки и темы для SV Fashion пиши голосом медиа: без первого лица («я», «мне», «я держала»),
+  без регалий автора («я 20 лет работала…») и без ВЫДУМАННЫХ историй и фактов (заказчицы,
+  спасённые выкройки, «Юдашкин делал три дня»). Только то, что можно проверить по новостям
+  и открытым фактам. Опыт практика проявляется в угле и точности взгляда, а не в рассказах о себе.
+- Темы для SV Fashion — по реальным текущим поводам из постов выше или по повторяющимся типам
+  тем, а не придуманные события.
+
 Структура (markdown):
 ## Главное
 5 выводов: что системно цепляет аудиторию в этом поле.
@@ -379,7 +399,7 @@ def analyse(outliers, flops, baselines):
 """
     message = client.messages.create(
         model=MODEL,
-        max_tokens=6000,
+        max_tokens=12000,
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text
