@@ -292,7 +292,30 @@ def commons_candidates(queries: List[str], per_query: int = 4) -> List[Dict]:
 # 3. Загрузка, фильтр, дубли
 # ---------------------------------------------------------------------------
 
+_SIZE_PARAMS = ("w=", "h=", "resize", "crop", "width", "height", "fit=", "quality", "q=")
+
+
+def _url_variants(url: str) -> List[str]:
+    """
+    Сначала пробуем оригинал без параметров уменьшения: многие сайты
+    (WordPress, CDN) отдают в og:image обрезанную копию 1000×563, а файл
+    без ?resize=... — это полноразмерный исходник.
+    """
+    base, _, query = url.partition("?")
+    if query and any(param in query.lower() for param in _SIZE_PARAMS):
+        return [base, url]
+    return [url]
+
+
 def _download(candidate: Dict) -> Optional[Dict]:
+    for variant in _url_variants(candidate["url"]):
+        result = _download_one({**candidate, "url": variant})
+        if result:
+            return result
+    return None
+
+
+def _download_one(candidate: Dict) -> Optional[Dict]:
     url = candidate["url"]
     reason = ""
     for headers in (
