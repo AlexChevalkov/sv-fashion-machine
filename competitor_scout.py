@@ -406,6 +406,61 @@ def analyse(outliers, flops, baselines):
 
 
 # ---------------------------------------------------------------------------
+# Шпаргалка для бота выбора тем + запись в Airtable
+# ---------------------------------------------------------------------------
+
+RUNS_TABLE = os.environ.get("SCOUT_RUNS_TABLE", "Разведка")
+
+
+def make_cheatsheet(report: str) -> str:
+    """Сжать отчёт до короткой шпаргалки, которую бот выбора тем читает каждый раз."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    prompt = f"""
+Ниже отчёт разведки конкурентов для русскоязычного fashion-медиа. Сожми его в шпаргалку для
+редактора-бота, который каждый день выбирает тему из свежих новостей. Строго не больше 1800 знаков,
+по-русски, без ссылок и без вступлений. Только то, что подтверждено несколькими постами.
+
+Формат:
+ЗАХОДИТ:
+- 5–6 типов тем/поводов, по одной строке, с силой сигнала (например «×8–12 у разных аккаунтов»)
+ФОРМУЛЫ ХУКОВ:
+- 6–8 формул первой строки, коротко, с мини-примером
+НЕ ЗАХОДИТ:
+- 4–5 пунктов
+НАША НИША:
+- 2–3 пункта: где голос практика haute couture сильнее всех
+
+Отчёт:
+{report[:14000]}
+"""
+    message = client.messages.create(
+        model=MODEL, max_tokens=1500, messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text.strip()
+
+
+def save_run(report: str, cheatsheet: str, n_posts: int, n_outliers: int) -> None:
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(RUNS_TABLE)}"
+    fields = {
+        "Прогон": f"Разведка {NOW:%d.%m.%Y}",
+        "Дата": NOW.strftime("%Y-%m-%d"),
+        "Шпаргалка": cheatsheet,
+        "Отчёт": report[:95000],
+        "Постов": n_posts,
+        "Выбросов": n_outliers,
+    }
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}", "Content-Type": "application/json"},
+        json={"fields": fields, "typecast": True},
+        timeout=30,
+    )
+    log(f"save run to Airtable: HTTP {resp.status_code} {resp.text[:200]}")
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     competitors = load_competitors()
@@ -472,9 +527,19 @@ def main():
         for o in discovered[:15]:
             top_table.append(f"| @{o['account']} | {o['name']} | {o['posts']} | {o['engagement']} |")
 
-    (OUT / "REPORT.md").write_text("\n".join(summary) + "\n" + report + "\n" + "\n".join(top_table),
-                                   encoding="utf-8")
+    full_report = "\n".join(summary) + "\n" + report + "\n" + "\n".join(top_table)
+    (OUT / "REPORT.md").write_text(full_report, encoding="utf-8")
     log("report written")
+
+    if outliers:
+        try:
+            cheatsheet = make_cheatsheet(report)
+            (OUT / "CHEATSHEET.md").write_text(cheatsheet, encoding="utf-8")
+            n_out = sum(1 for p in scored if p["score"] >= OUTLIER_MIN)
+            if os.environ.get("SCOUT_SAVE", "1") != "0":
+                save_run(full_report, cheatsheet, len(posts), n_out)
+        except Exception as exc:
+            log(f"cheatsheet/save failed: {exc!r}")
 
 
 if __name__ == "__main__":

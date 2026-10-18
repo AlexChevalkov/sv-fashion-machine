@@ -477,8 +477,14 @@ def notify_pending(content_records: list, visual_records: list) -> int:
         hook = sel(fields, "HOOK")
         caption = (sel(fields, "Final Caption") or "")[:500]
         rid = record["id"]
+        # Потенциал хука по данным разведки конкурентов (если есть).
+        score = fields.get("Hook Score")
+        evidence = sel(fields, "Hook Evidence")
+        score_block = ""
+        if isinstance(score, (int, float)) and score > 0:
+            score_block = f"🎯 Потенциал хука: {int(score)}/10\n{evidence}\n\n"
         text = (
-            f"🆕 Новая тема на согласование\n\n{title}\n\n{hook}\n\n{caption}\n\n"
+            f"🆕 Новая тема на согласование\n\n{title}\n\n{score_block}{hook}\n\n{caption}\n\n"
             f"💬 Ответь на ЭТО сообщение одним словом (свайп → «Ответить»):\n"
             f"пост / рилс / карусель / нет\n\n"
             f"[c:{rid}]"

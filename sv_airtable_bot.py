@@ -709,6 +709,42 @@ def build_candidates_text(articles: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+SCOUT_TABLE_NAME = os.environ.get("AIRTABLE_SCOUT_TABLE_NAME", "Разведка")
+
+
+def fetch_scout_cheatsheet() -> tuple[str, str]:
+    """
+    Последняя шпаргалка бота-разведчика: что сейчас цепляет аудиторию у
+    конкурентов. Если таблицы нет или она пустая — выбор работает как раньше.
+    """
+    if not (AIRTABLE_API_KEY and AIRTABLE_BASE_ID):
+        return "", ""
+    try:
+        url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{quote(SCOUT_TABLE_NAME, safe='')}"
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
+            params={
+                "maxRecords": 1,
+                "sort[0][field]": "Дата",
+                "sort[0][direction]": "desc",
+                "fields[]": ["Шпаргалка", "Дата"],
+            },
+            timeout=30,
+        )
+        if response.status_code != 200:
+            print("Scout cheatsheet not available:", response.status_code)
+            return "", ""
+        records = response.json().get("records", [])
+        if not records:
+            return "", ""
+        fields = records[0].get("fields", {})
+        return str(fields.get("Шпаргалка", "")).strip(), str(fields.get("Дата", ""))
+    except Exception as exc:
+        print("Scout cheatsheet fetch failed:", repr(exc))
+        return "", ""
+
+
 def select_editorial_topic(
     articles: list[dict],
     evergreen_ideas: list[dict],
@@ -717,6 +753,8 @@ def select_editorial_topic(
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     candidates_text = build_candidates_text(articles)
+    scout_text, scout_date = fetch_scout_cheatsheet()
+    print("Scout cheatsheet:", "есть, от " + scout_date if scout_text else "нет")
 
     evergreen_text = "\n".join(
         [f"- {item['title']}: {item['angle']}" for item in evergreen_ideas[:10]]
@@ -801,6 +839,11 @@ Evergreen-темы на случай, если свежие инфоповоды
 
 {evergreen_text}
 
+ЧТО СЕЙЧАС ЦЕПЛЯЕТ АУДИТОРИЮ — данные разведки конкурентов ({scout_date or "нет данных"}).
+Это посты, которые в 3–12 раз обогнали обычный уровень своих аккаунтов:
+
+{scout_text or "Данных разведки пока нет — оценивай потенциал хука по общим принципам: конкретика, конфликт, закулисье, цифры, имя."}
+
 ШАГ 1. РОТАЦИЯ РУБРИК.
 Определи по списку недавних тем (рубрики указаны в скобках), какие рубрики
 выходили последними, и реши, какая рубрика нужна сегодня по правилам
@@ -824,12 +867,21 @@ depth_score: 0-15
 Есть ли культурная, архивная, бизнесовая или визуальная глубина?
 (Для Light & Fun низкий балл здесь — это нормально.)
 
+hook_potential_score: 0-25
+Насколько тема совпадает с тем, что СЕЙЧАС цепляет аудиторию по данным разведки:
+тип повода, конфликт, закулисье, формула хука. Опирайся на блок разведки выше,
+а не на вкус. Тема, похожая на то, что «не заходит», получает 0–5.
+
 overexposure_penalty: 0-25
 Штраф за слишком очевидную, массовую, уже заезженную новость.
 (Для Light & Fun и Hot Take штраф считай вдвое меньше — там громкость
 работает на нас.)
 
-total_score = expert_angle_score + originality_score + audience_value_score + depth_score - overexposure_penalty
+total_score = expert_angle_score + originality_score + audience_value_score + depth_score + hook_potential_score - overexposure_penalty
+
+ШАГ 3. Для выбранной темы и двух лучших отклонённых дай «потенциал хука»
+по шкале 1–10 и коротко объясни, на какой паттерн из разведки он опирается.
+Предложи первую строку поста по одной из формул хуков (голосом медиа, без «я»).
 
 Верни СТРОГО валидный JSON без markdown:
 
@@ -845,18 +897,23 @@ total_score = expert_angle_score + originality_score + audience_value_score + de
   "editorial_angle": "какой уникальный авторский угол использовать",
   "why_follow_this_account": "почему подписчику нужен именно этот аккаунт для этой темы",
   "overexposure_risk": "low/medium/high",
+  "hook_score": 7,
+  "hook_evidence": "на какой паттерн разведки опирается (до 25 слов)",
+  "hook_line": "предложенная первая строка поста по формуле хука (до 14 слов)",
   "scores": {{
     "expert_angle_score": 0,
     "originality_score": 0,
     "audience_value_score": 0,
     "depth_score": 0,
+    "hook_potential_score": 0,
     "overexposure_penalty": 0,
     "total_score": 0
   }},
   "top_rejected": [
     {{
-      "title": "отклонённая громкая тема",
-      "reason": "почему не выбрана"
+      "title": "отклонённая тема",
+      "reason": "почему не выбрана",
+      "hook_score": 5
     }}
   ]
 }}
@@ -876,7 +933,8 @@ total_score = expert_angle_score + originality_score + audience_value_score + de
 - editorial_angle: максимум 30 слов;
 - why_follow_this_account: максимум 20 слов;
 - final_emotion: 2-5 слов;
-- top_rejected: РОВНО 2 элемента, reason не длиннее 12 слов.
+- top_rejected: РОВНО 2 элемента, reason не длиннее 12 слов;
+- hook_evidence: максимум 25 слов; hook_line: максимум 14 слов.
 Никакого текста до или после JSON.
 """
 
@@ -898,6 +956,27 @@ total_score = expert_angle_score + originality_score + audience_value_score + de
     print(json.dumps(selection, ensure_ascii=False, indent=2))
 
     return selection
+
+
+def hook_fields(selection: dict) -> dict:
+    """Потенциал хука и альтернативы — для карточки в Content Inbox и Telegram."""
+    try:
+        score = int(round(float(selection.get("hook_score") or 0)))
+    except (TypeError, ValueError):
+        score = 0
+    alternatives = []
+    for item in selection.get("top_rejected") or []:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        alt_score = item.get("hook_score")
+        alternatives.append(f"{title} — {alt_score}/10" if alt_score not in (None, "") else title)
+    return {
+        "hook_score": max(0, min(10, score)),
+        "hook_evidence": str(selection.get("hook_evidence", "")).strip(),
+        "hook_line": str(selection.get("hook_line", "")).strip(),
+        "alternatives": alternatives,
+    }
 
 
 def build_selected_context(
@@ -931,6 +1010,7 @@ def build_selected_context(
             "why_follow": selection.get("why_follow_this_account", ""),
             "rubric": selection.get("rubric", "Fashion Context"),
             "final_emotion": selection.get("final_emotion", ""),
+            **hook_fields(selection),
         }
 
     index = max(1, selected_index) - 1
@@ -956,6 +1036,7 @@ def build_selected_context(
         "why_follow": selection.get("why_follow_this_account", ""),
         "rubric": selection.get("rubric", "Fashion Context"),
         "final_emotion": selection.get("final_emotion", ""),
+        **hook_fields(selection),
     }
 
 
@@ -1028,6 +1109,10 @@ def generate_card(selected: dict) -> dict:
 
 Почему подписчику нужен именно этот аккаунт:
 {selected['why_follow']}
+
+Предложенная первая строка по данным разведки (возьми её или сделай сильнее
+по той же формуле): {selected.get('hook_line', '') or 'нет'}
+Почему тема должна зацепить: {selected.get('hook_evidence', '') or 'нет данных'}
 
 Рубрика поста (задаёт тон): {selected.get('rubric', 'Fashion Context')}
 Финальная эмоция поста: {selected.get('final_emotion', 'на твой выбор, но без повторения морали про обесцененное ремесло')}
@@ -1125,6 +1210,13 @@ def generate_card(selected: dict) -> dict:
         note = "Редактор-адаптатор пояснил: " + (", ".join(adapted["explained"]) or "—")
         card["raw_text"] = (card.get("raw_text", "") + "\n\n" + note).strip()
 
+    # Потенциал хука по разведке — для сортировки в Airtable и карточки в Telegram.
+    card["hook_score"] = selected.get("hook_score") or None
+    evidence = selected.get("hook_evidence", "")
+    if selected.get("alternatives"):
+        evidence = (evidence + "\nАльтернативы: " + "; ".join(selected["alternatives"])).strip()
+    card["hook_evidence"] = evidence
+
     return card
 
 
@@ -1164,6 +1256,8 @@ def create_content_inbox_record(card: dict) -> None:
         "Format": card.get("format", "Single Post"),
         "Rubric": card.get("rubric", "Fashion Context"),
         "Source": card.get("source", "Bot"),
+        "Hook Score": card.get("hook_score"),
+        "Hook Evidence": card.get("hook_evidence", ""),
     }
     fields = {key: value for key, value in fields.items() if value not in (None, "")}
 
@@ -1214,6 +1308,10 @@ def main() -> None:
 
     print("\n=== Generated card ===")
     print(json.dumps(card, ensure_ascii=False, indent=2))
+
+    if os.environ.get("DRY_RUN", "").strip() in ("1", "true", "yes"):
+        print("DRY_RUN: карточка НЕ записана в Airtable.")
+        return
 
     # Write directly to Content Inbox (reliable). Fall back to the webhook
     # automation only if the direct API create fails.

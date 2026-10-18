@@ -1,0 +1,28 @@
+name: Topic Dry Run
+
+# Проверка выбора темы без записи: бот выбирает тему и пишет карточку,
+# но НЕ создаёт запись в Content Inbox и не трогает Telegram.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/topic-test
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Select topic (dry run)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIRTABLE_WEBHOOK_URL: ${{ secrets.AIRTABLE_WEBHOOK_URL }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: Content Inbox
+          DRY_RUN: "1"
+        run: python sv_airtable_bot.py

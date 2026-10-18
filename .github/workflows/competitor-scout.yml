@@ -3,6 +3,8 @@ name: Competitor Scout
 # Разведка конкурентов: посты из таблицы «Конкуренты», выбросы, разбор Claude.
 # Ничего не публикует и не меняет в Airtable. Отчёт — в артефакте scout-report.
 on:
+  schedule:
+    - cron: "17 4 * * 1"   # каждый понедельник, 07:17 по Москве
   workflow_dispatch:
     inputs:
       days:
