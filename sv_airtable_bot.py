@@ -911,7 +911,7 @@ total_score = expert_angle_score + originality_score + audience_value_score + de
   }},
   "top_rejected": [
     {{
-      "title": "отклонённая тема",
+      "title": "отклонённая тема — коротко по-русски",
       "reason": "почему не выбрана",
       "hook_score": 5
     }}
