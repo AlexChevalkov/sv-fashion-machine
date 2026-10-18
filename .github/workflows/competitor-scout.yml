@@ -1,0 +1,38 @@
+name: Competitor Scout
+
+# Разведка конкурентов: посты из таблицы «Конкуренты», выбросы, разбор Claude.
+# Ничего не публикует и не меняет в Airtable. Отчёт — в артефакте scout-report.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "За сколько дней собирать посты"
+        required: false
+        default: "30"
+  push:
+    branches:
+      - claude/scout
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run scout
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          SCOUT_DAYS: ${{ github.event.inputs.days || '30' }}
+        run: python competitor_scout.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scout-report
+          path: outputs/scout
