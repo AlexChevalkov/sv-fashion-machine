@@ -225,7 +225,7 @@ def serper_candidates(queries: List[str], per_query: int = 6) -> List[Dict]:
                 out.append(
                     {
                         "url": url,
-                        "credit": item.get("domain") or _domain(item.get("link", "")) or item.get("source", ""),
+                        "credit": re.sub(r"^www\.", "", item.get("domain") or "") or _domain(item.get("link", "")) or item.get("source", ""),
                         "page": item.get("link", ""),
                         "origin": "google",
                         "title": item.get("title", ""),
