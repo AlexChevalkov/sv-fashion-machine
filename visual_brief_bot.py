@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import requests
 import anthropic
 
+from editorial_rules import AUDIENCE_RULES, adapt_caption, normalize_hashtags
+
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -235,6 +237,9 @@ SV Fashion Media / @sv_fashionacademy
 Визуал должен выглядеть как fashion media, но достаточно цепко и ярко для роста охвата.
 
 Пиши по-русски.
+""" + AUDIENCE_RULES + """
+Тексты на слайдах и в подписи подчиняются тем же правилам понятности.
+Хэштегов в подписи — не больше 4, #sv_fashion_media добавит система.
 """
 
     user_prompt = f"""
@@ -385,6 +390,23 @@ Krea Model Recommendation: "Krea Image", "Nano Banana", "Kling", "Runway", "Veo 
 
     brief["Visual Mode"] = brief.get("Visual Mode") or "Hybrid"
     brief["Krea Model Recommendation"] = brief.get("Krea Model Recommendation") or "Manual Choice"
+
+    # Подпись к посту.
+    # POST: текст уже прошёл редактора-адаптатора и одобрен Alex в Content
+    # Inbox — берём его дословно, модель брифа его не переписывает.
+    # Остальные форматы: подпись пишет бриф, поэтому прогоняем её через
+    # редактора-адаптатора. Хэштеги в обоих случаях — по правилу (≤5).
+    if is_post and final_caption.strip():
+        brief["Final Reel Caption"] = normalize_hashtags(final_caption)
+    elif brief.get("Final Reel Caption"):
+        adapted = adapt_caption(
+            brief["Final Reel Caption"],
+            title=post_title,
+            source_url=source_url,
+            client=client,
+            model=MODEL,
+        )
+        brief["Final Reel Caption"] = normalize_hashtags(adapted["text"], adapted["hashtags"])
 
     if chosen_format == "Reel + Carousel":
         brief["Krea Model Recommendation"] = "Manual Choice"

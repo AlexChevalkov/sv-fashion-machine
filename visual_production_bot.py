@@ -16,6 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from r2_storage import r2_is_configured, upload_file_to_r2
 from buffer_publish import buffer_is_configured, create_instagram_draft
+from photo_editor import find_photos
+from post_layout import pick_palette, render_post_carousel
 
 
 # =========================================================
@@ -3699,7 +3701,36 @@ def process_post_record(record: Dict[str, Any]) -> None:
 
     slide_dir = OUTPUT_DIR / record_id / "post"
     ensure_dir(slide_dir)
-    slide_paths = render_all_post_slides(slide_dir, title, body)
+
+    # Реальные фото по теме: первое — на обложку, ещё до двух — внутрь.
+    photos = []
+    try:
+        photos = find_photos(
+            title=safe_get(fields, "Job Title", "") or title,
+            text=body_text,
+            source_url=safe_get(fields, "Source URL", ""),
+            want=3,
+            out_dir=slide_dir / "photos",
+            model=ANTHROPIC_MODEL,
+        )
+    except Exception as photo_error:
+        print("Photo editor failed, rendering text-only:", repr(photo_error))
+        photos = []
+
+    palette = pick_palette(safe_get(fields, "Post Color", ""), seed=record_id)
+    slide_paths = render_post_carousel(
+        slide_dir,
+        title,
+        body,
+        photos=photos,
+        palette=palette,
+        brand=BRAND_NAME,
+    )
+    photo_note = (
+        "Фото: " + ", ".join(f"{p['credit']} ({p['origin']})" for p in photos)
+        if photos
+        else "Фото не найдены — карусель только из текста."
+    )
 
     ok, info = publish_draft_to_buffer(
         record_id,
@@ -3725,7 +3756,7 @@ def process_post_record(record: Dict[str, Any]) -> None:
             "Render Notes": append_note(
                 existing_notes,
                 f"""
-Post Mode: {len(slide_paths)} text slides rendered (colour background + text, no Krea).
+Post Mode v2: {len(slide_paths)} slides (palette {palette}). {photo_note}
 {buffer_note}
 Status moved to {final_status}.
 Generated at:
@@ -4265,7 +4296,42 @@ def process_record(record: Dict[str, Any]) -> None:
 
         raw_items: List[Dict[str, str]] = []
 
-        for idx in range(slide_count):
+        # Сначала реальные фото по теме (фоторедактор). Krea генерирует
+        # только те слайды, для которых подходящих фото не нашлось.
+        photos = []
+        try:
+            photos = find_photos(
+                title=safe_get(fields, "Source Post Title") or job_title,
+                text=safe_get(fields, "Source Final Caption") or safe_get(fields, "Final Reel Caption"),
+                source_url=safe_get(fields, "Source URL"),
+                want=slide_count,
+                out_dir=raw_dir / "photos",
+                model=ANTHROPIC_MODEL,
+            )
+        except Exception as photo_error:
+            print("Photo editor failed, all slides via Krea:", repr(photo_error))
+            photos = []
+
+        for idx, photo in enumerate(photos[:slide_count]):
+            slide_num = idx + 1
+            permanent_url = mirror_to_r2(
+                photo["path"],
+                f"bot-output/{build_job_r2_folder(record)}/carousel/slide_{slide_num:02d}.jpg",
+                "",
+            )
+            if not permanent_url:
+                print(f"R2 upload failed for photo slide {slide_num}; stopping photo slides here.")
+                break
+            raw_items.append(
+                {
+                    "slide": str(slide_num),
+                    "url": permanent_url,
+                    "job_id": "photo-" + re.sub(r"[^A-Za-z0-9]+", "-", photo.get("credit", "") or "source").strip("-"),
+                }
+            )
+            print(f"Slide {slide_num}: real photo from {photo.get('credit')}")
+
+        for idx in range(len(raw_items), slide_count):
             slide_num = idx + 1
             prompt = krea_prompts[idx]
 

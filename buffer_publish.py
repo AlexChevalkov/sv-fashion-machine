@@ -146,6 +146,16 @@ def create_instagram_draft(
     if not buffer_is_configured():
         return False, "Buffer not configured (missing BUFFER_ACCESS_TOKEN)."
 
+    # Жёсткое правило для КАЖДОГО черновика: не больше 5 хэштегов,
+    # #sv_fashion_media всегда первый. Делается здесь, в одной точке,
+    # поэтому действует для постов, каруселей и рилсов одинаково.
+    try:
+        from editorial_rules import normalize_hashtags
+
+        caption = normalize_hashtags(caption or "")
+    except Exception as exc:
+        print("Hashtag normalization skipped:", repr(exc))
+
     image_urls = [u for u in (image_urls or []) if u]
 
     if video_url:

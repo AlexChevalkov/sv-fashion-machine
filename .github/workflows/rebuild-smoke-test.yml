@@ -1,0 +1,37 @@
+name: Rebuild Smoke Test
+
+# Проверка перестройки на реальных темах. Только чтение Airtable,
+# ничего не пишет в Airtable и не создаёт черновиков в Buffer.
+on:
+  workflow_dispatch:
+    inputs:
+      records:
+        description: "ID записей Visual Jobs через запятую"
+        required: false
+        default: "recnnnbd2uxtd15PL,recXPLzt1vVLldj6C,rec3cBO2hFJTTvuD2"
+  push:
+    branches:
+      - claude/content-rebuild
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run smoke test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          SMOKE_RECORDS: ${{ github.event.inputs.records || 'recnnnbd2uxtd15PL,recXPLzt1vVLldj6C,rec3cBO2hFJTTvuD2' }}
+        run: python tools/rebuild_smoke_test.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test
+          path: outputs/smoke

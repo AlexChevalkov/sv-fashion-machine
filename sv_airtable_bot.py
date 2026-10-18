@@ -11,6 +11,8 @@ import requests
 import anthropic
 from bs4 import BeautifulSoup
 
+from editorial_rules import AUDIENCE_RULES, adapt_caption, normalize_hashtags
+
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 AIRTABLE_WEBHOOK_URL = os.environ["AIRTABLE_WEBHOOK_URL"]
@@ -1007,7 +1009,7 @@ def generate_card(selected: dict) -> dict:
 или другой запрещённый приём — перепиши эту фразу. Только потом отдавай JSON.
 
 Пиши по-русски.
-"""
+""" + AUDIENCE_RULES
 
     user_prompt = f"""
 Выбранный инфоповод:
@@ -1107,6 +1109,21 @@ def generate_card(selected: dict) -> dict:
 
     if not card.get("source_url"):
         card["source_url"] = selected.get("link", "")
+
+    # Второй проход: редактор-адаптатор делает текст понятным русскоязычной
+    # аудитории (поясняет бренды, имена, аббревиатуры, англицизмы) и
+    # предлагает хэштеги. При любом сбое остаётся исходный текст.
+    adapted = adapt_caption(
+        card.get("final_caption", ""),
+        title=card.get("title", ""),
+        source_url=card.get("source_url", ""),
+        client=client,
+        model=MODEL,
+    )
+    card["final_caption"] = normalize_hashtags(adapted["text"], adapted["hashtags"])
+    if adapted["ok"]:
+        note = "Редактор-адаптатор пояснил: " + (", ".join(adapted["explained"]) or "—")
+        card["raw_text"] = (card.get("raw_text", "") + "\n\n" + note).strip()
 
     return card
 
