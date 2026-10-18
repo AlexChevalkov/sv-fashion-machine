@@ -293,29 +293,36 @@ def commons_candidates(queries: List[str], per_query: int = 4) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def _download(candidate: Dict) -> Optional[Dict]:
-    try:
-        resp = requests.get(
-            candidate["url"],
-            headers={"User-Agent": UA, "Referer": candidate.get("page") or ""},
-            timeout=20,
-            stream=True,
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.raw.read(MAX_BYTES + 1, decode_content=True)
-        if len(data) > MAX_BYTES or len(data) < 15_000:
-            return None
-        image = Image.open(io.BytesIO(data))
-        image = ImageOps.exif_transpose(image).convert("RGB")
-        w, h = image.size
-        if min(w, h) < MIN_SIDE:
-            return None
-        ratio = w / h
-        if ratio > 2.2 or ratio < 0.4:   # баннеры и полоски
-            return None
-        return {**candidate, "image": image}
-    except Exception:
-        return None
+    url = candidate["url"]
+    reason = ""
+    for headers in (
+        {"User-Agent": UA, "Referer": candidate.get("page") or "", "Accept": "image/avif,image/webp,image/*,*/*"},
+        {"User-Agent": UA, "Accept": "image/*,*/*"},
+    ):
+        try:
+            resp = requests.get(url, headers=headers, timeout=20, stream=True)
+            if resp.status_code != 200:
+                reason = f"HTTP {resp.status_code}"
+                continue
+            data = resp.raw.read(MAX_BYTES + 1, decode_content=True)
+            if len(data) > MAX_BYTES or len(data) < 15_000:
+                reason = f"size {len(data)}"
+                continue
+            image = Image.open(io.BytesIO(data))
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            w, h = image.size
+            if min(w, h) < MIN_SIDE:
+                reason = f"small {w}x{h}"
+                break
+            ratio = w / h
+            if ratio > 2.2 or ratio < 0.4:   # баннеры и полоски
+                reason = f"ratio {w}x{h}"
+                break
+            return {**candidate, "image": image}
+        except Exception as exc:
+            reason = repr(exc)[:120]
+    _log(f"skip ({reason}): {url[:110]}")
+    return None
 
 
 def _ahash(image: Image.Image) -> int:
