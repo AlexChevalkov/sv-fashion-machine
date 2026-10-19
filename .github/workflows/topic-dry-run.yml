@@ -4,6 +4,11 @@ name: Topic Dry Run
 # но НЕ создаёт запись в Content Inbox и не трогает Telegram.
 on:
   workflow_dispatch:
+    inputs:
+      force_url:
+        description: "Ссылка на статью — написать карточку по ней (необязательно)"
+        required: false
+        default: ""
   push:
     branches:
       - claude/topic-test
@@ -25,4 +30,5 @@ jobs:
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: Content Inbox
           DRY_RUN: "1"
+          FORCE_SOURCE_URL: ${{ github.event.inputs.force_url || '' }}
         run: python sv_airtable_bot.py

@@ -137,6 +137,19 @@ AUDIENCE_RULES = """
   FW → «осень-зима», CEO → «гендиректор», drop → «выпуск коллекции».
 - Абстрактные «умные» фразы переписывай конкретно: кто, что сделал,
   сколько, что это меняет. Одна мысль — одно предложение, до 25 слов.
+- НАЗВАНИЯ И ИМЕНА. Событие, место, премию, человека при первом упоминании
+  пиши так, чтобы их можно было найти: устоявшееся русское название и
+  оригинал латиницей в скобках — «Фестиваль моды в Йере (Festival d'Hyères)»,
+  «Юи Чен (Yui Chen)». Не изобретай транслитерацию: если не уверен в
+  устоявшемся русском написании — пиши оригиналом латиницей.
+- СНАЧАЛА ФАКТ. Читатель, который не слышал новость, после первых двух
+  абзацев должен суметь пересказать: что произошло, кто, где, когда, чем
+  это закончилось. Мнение и выводы — только после этого.
+- КОНКРЕТИКА ВМЕСТО АБСТРАКЦИЙ. Фразы вроде «честный разговор индустрии»,
+  «жюри выбирает язык», «содержательный сигнал», «точка опоры» без
+  конкретного факта рядом — запрещены. Если речь о показе, конкурсе или
+  коллекции — назови, что именно сделано: вещи, материалы, силуэт, идея.
+- Год, номер события, должности и названия бери из источника, не по памяти.
 - Факты, цифры, имена и цитаты не меняй. НОВЫХ фактов не добавляй:
   никаких деталей коллекции, событий, дат, цифр и имён, которых нет в
   тексте автора. Разрешено только короткое пояснение «кто это / что это»
@@ -152,15 +165,25 @@ _ADAPTOR_SYSTEM = f"""
 Твоя единственная задача — сделать текст понятным широкой русскоязычной
 аудитории, не превращая его в лекцию.
 {AUDIENCE_RULES}
+ПОРЯДОК РАБОТЫ:
+1. Прочитай текст глазами человека, который НЕ слышал эту новость. Выпиши
+   до 5 вопросов, которые у него возникнут («что это за фестиваль?», «кто
+   победил и с чем?», «кто эти люди?», «что значит это слово?»).
+2. Ответь на каждый вопрос прямо в тексте, коротко, фактами из ТЕКСТА
+   ИСТОЧНИКА ниже. Если ответа в источнике нет — перепиши или убери фразу,
+   которая без этого ответа непонятна. Не додумывай.
+3. Проверь имена и названия по правилу выше и по написанию в источнике.
+
 ФОРМА:
 - Первый абзац — короткий заголовок-хук до 12 слов, отдельной строкой.
   Пояснения в хук не вставляй — они идут дальше.
 - Абзацы по 1–3 предложения, между абзацами пустая строка.
-- Структуру автора сохраняй: те же абзацы в том же порядке, абзацы не
-  склеивай и не переставляй.
+- Структуру автора сохраняй, насколько можно: абзацы не склеивай.
+  Если первые два абзаца не объясняют, что произошло, — добавь второй
+  абзац с фактами (кто, что, где, когда) из источника.
 - Эмодзи: только те, что уже есть у автора, на тех же местах. Новых
   эмодзи не добавляй никогда.
-- Длина — не больше исходной плюс 20%. Пояснения короткие, без лекций.
+- Длина — не больше исходной плюс 35%. Пояснения короткие, без лекций.
 - Запрещены: конструкция «не X, а Y» в любом виде; риторический вопрос с
   мгновенным ответом; триады рубленых фраз; финал-афоризм с тире;
   связки «и вот почему», «важно другое», «но есть нюанс», «на самом деле».
@@ -170,7 +193,7 @@ _ADAPTOR_SYSTEM = f"""
 #sv_fashion_media — его добавит система. В текст хэштеги не вставляй.
 
 Верни СТРОГО JSON без markdown:
-{{"text": "...", "hashtags": ["#...", "#...", "#...", "#..."], "explained": ["что пояснил", "..."]}}
+{{"reader_questions": ["вопрос читателя", "..."], "text": "...", "hashtags": ["#...", "#...", "#...", "#..."], "explained": ["что пояснил", "..."]}}
 """
 
 
@@ -200,12 +223,61 @@ def _drop_new_emoji(original: str, new_text: str) -> str:
     return "\n".join(line.strip() for line in cleaned.split("\n")).strip()
 
 
+_ARTICLE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0 Safari/537.36"
+)
+
+
+def fetch_article_text(url: str, limit: int = 7000) -> str:
+    """
+    Текст статьи-источника (заголовок, лид и абзацы), чтобы автор и редактор
+    писали по фактам, а не по двум строкам из RSS. При ошибке — пустая строка.
+    """
+    if not url or not str(url).startswith("http"):
+        return ""
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+
+        resp = requests.get(url, headers={"User-Agent": _ARTICLE_UA}, timeout=25)
+        if resp.status_code != 200:
+            print(f"Article fetch: HTTP {resp.status_code} for {url}")
+            return ""
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "aside", "form", "noscript"]):
+            tag.decompose()
+        parts = []
+        title = soup.find("meta", attrs={"property": "og:title"})
+        if title and title.get("content"):
+            parts.append(title["content"].strip())
+        desc = soup.find("meta", attrs={"property": "og:description"}) or soup.find(
+            "meta", attrs={"name": "description"}
+        )
+        if desc and desc.get("content"):
+            parts.append(desc["content"].strip())
+        scope = soup.find("article") or soup.find("main") or soup
+        for p in scope.find_all(["p", "h2", "h3"]):
+            line = p.get_text(" ", strip=True)
+            if len(line) >= 40 and line not in parts:
+                parts.append(line)
+            if sum(len(x) for x in parts) > limit:
+                break
+        text = "\n".join(parts)[:limit]
+        print(f"Article fetch: {len(text)} chars from {url}")
+        return text
+    except Exception as exc:
+        print("Article fetch failed:", repr(exc))
+        return ""
+
+
 def adapt_caption(
     text: str,
     title: str = "",
     source_url: str = "",
     client=None,
     model: str = "",
+    source_text: str = "",
 ) -> dict:
     """
     Прогнать текст через редактора-адаптатора.
@@ -227,13 +299,16 @@ def adapt_caption(
             client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
         model = model or os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-4-6"
 
+        if not source_text and source_url:
+            source_text = fetch_article_text(source_url)
         user = (
             f"Тема: {title}\nИсточник: {source_url}\n\n"
+            f"ТЕКСТ ИСТОЧНИКА (факты бери только отсюда):\n{source_text or 'недоступен — новых фактов не добавляй'}\n\n"
             f"Текст автора:\n{body}"
         )
         message = client.messages.create(
             model=model,
-            max_tokens=3000,
+            max_tokens=4000,
             system=_ADAPTOR_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
@@ -241,13 +316,15 @@ def adapt_caption(
         new_text = str(data.get("text") or "").strip()
 
         # Защита от поломки: пустой, слишком короткий или раздутый ответ.
-        if not new_text or len(new_text) < len(body) * 0.6 or len(new_text) > len(body) * 1.45:
+        if not new_text or len(new_text) < len(body) * 0.6 or len(new_text) > len(body) * 1.6:
             print("Adaptor: ответ отклонён по длине, оставлен исходный текст.")
             return fallback
 
         new_text = _drop_new_emoji(body, new_text)
         hashtags = [str(t) for t in (data.get("hashtags") or []) if str(t).strip()]
         explained = [str(x) for x in (data.get("explained") or [])]
+        questions = [str(x) for x in (data.get("reader_questions") or [])]
+        print("Adaptor: вопросы читателя —", " | ".join(questions) or "нет")
         print("Adaptor: пояснено —", ", ".join(explained) or "ничего")
         return {"text": new_text, "hashtags": hashtags, "explained": explained, "ok": True}
     except Exception as exc:  # конвейер не должен падать из-за редактора

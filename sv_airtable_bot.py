@@ -11,7 +11,7 @@ import requests
 import anthropic
 from bs4 import BeautifulSoup
 
-from editorial_rules import AUDIENCE_RULES, adapt_caption, normalize_hashtags
+from editorial_rules import AUDIENCE_RULES, adapt_caption, fetch_article_text, normalize_hashtags
 
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -1042,6 +1042,9 @@ def build_selected_context(
 
 def generate_card(selected: dict) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Полный текст статьи: без него автор пишет по двум строкам из RSS
+    # и заполняет пустоту абстракциями.
+    source_text = fetch_article_text(selected.get("link", "")) if selected.get("link") else ""
 
     system_prompt = """
 Ты — редактор экспертного fashion-медиа @sv_fashionacademy.
@@ -1100,6 +1103,9 @@ def generate_card(selected: dict) -> dict:
 Заголовок: {selected['title']}
 Кратко: {selected['summary']}
 Ссылка: {selected['link']}
+
+ТЕКСТ СТАТЬИ-ИСТОЧНИКА (факты, имена, даты и написание бери ТОЛЬКО отсюда):
+{source_text or 'недоступен — пиши только то, что есть в заголовке и кратком описании, без домыслов'}
 
 Почему выбран:
 {selected['selected_reason']}
@@ -1204,6 +1210,7 @@ def generate_card(selected: dict) -> dict:
         source_url=card.get("source_url", ""),
         client=client,
         model=MODEL,
+        source_text=source_text,
     )
     card["final_caption"] = normalize_hashtags(adapted["text"], adapted["hashtags"])
     if adapted["ok"]:
@@ -1283,6 +1290,22 @@ def main() -> None:
     print("Webhook host:", webhook_info.netloc)
     print("Airtable base id:", AIRTABLE_BASE_ID[:8] + "..." if AIRTABLE_BASE_ID else "missing")
     print("Airtable table name:", AIRTABLE_TABLE_NAME or "missing")
+
+    forced_url = os.environ.get("FORCE_SOURCE_URL", "").strip()
+    if forced_url:
+        # Режим отладки: написать карточку по конкретной ссылке, минуя выбор темы.
+        page = fetch_article_text(forced_url, limit=600)
+        first = page.split("\n")[0] if page else forced_url
+        selected_context = {
+            "type": "news", "title": first, "summary": page[:400], "source": get_domain(forced_url),
+            "link": forced_url, "editorial_angle": "", "selected_reason": "отладка по ссылке",
+            "why_follow": "", "rubric": "Shows & Collections", "final_emotion": "",
+            "hook_score": 0, "hook_evidence": "", "hook_line": "", "alternatives": [],
+        }
+        card = generate_card(selected_context)
+        print("\n=== Generated card (forced URL) ===")
+        print(json.dumps(card, ensure_ascii=False, indent=2))
+        return
 
     existing_urls, existing_titles, recent_titles = fetch_existing_content()
 
