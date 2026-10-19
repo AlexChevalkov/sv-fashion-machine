@@ -301,24 +301,40 @@ def adapt_caption(
 
         if not source_text and source_url:
             source_text = fetch_article_text(source_url)
-        user = (
-            f"Тема: {title}\nИсточник: {source_url}\n\n"
-            f"ТЕКСТ ИСТОЧНИКА (факты бери только отсюда):\n{source_text or 'недоступен — новых фактов не добавляй'}\n\n"
-            f"Текст автора:\n{body}"
-        )
-        message = client.messages.create(
-            model=model,
-            max_tokens=4000,
-            system=_ADAPTOR_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-        data = _extract_json(message.content[0].text)
-        new_text = str(data.get("text") or "").strip()
+        min_len, max_len = int(len(body) * 0.6), int(len(body) * 1.45) + 150
 
-        # Защита от поломки: пустой, слишком короткий или раздутый ответ.
-        if not new_text or len(new_text) < len(body) * 0.6 or len(new_text) > len(body) * 1.6:
-            print("Adaptor: ответ отклонён по длине, оставлен исходный текст.")
-            return fallback
+        data, new_text = {}, ""
+        for attempt in (1, 2):
+            limit_note = (
+                f"\n\nОГРАНИЧЕНИЕ ДЛИНЫ: итоговый текст от {min_len} до {max_len} знаков. "
+                "Если текст автора уже понятен — меняй минимально."
+            )
+            if attempt == 2:
+                limit_note += (
+                    f"\nПрошлый вариант был {len(new_text)} знаков — это вне рамок. "
+                    "Сократи пояснения, оставь только самое нужное."
+                )
+            user = (
+                f"Тема: {title}\nИсточник: {source_url}\n\n"
+                f"ТЕКСТ ИСТОЧНИКА (факты бери только отсюда):\n{source_text or 'недоступен — новых фактов не добавляй'}\n\n"
+                f"Текст автора ({len(body)} знаков):\n{body}{limit_note}"
+            )
+            message = client.messages.create(
+                model=model,
+                max_tokens=4000,
+                system=_ADAPTOR_SYSTEM,
+                messages=[{"role": "user", "content": user}],
+            )
+            data = _extract_json(message.content[0].text)
+            new_text = str(data.get("text") or "").strip()
+            if new_text and min_len <= len(new_text) <= max_len:
+                break
+            print(f"Adaptor: попытка {attempt} вне рамок длины ({len(new_text)} при {len(body)}).")
+        else:
+            # Защита от поломки: оставляем текст автора, но хэштеги берём.
+            print("Adaptor: правка отклонена по длине, оставлен исходный текст.")
+            hashtags = [str(t) for t in (data.get("hashtags") or []) if str(t).strip()]
+            return {**fallback, "hashtags": hashtags}
 
         new_text = _drop_new_emoji(body, new_text)
         hashtags = [str(t) for t in (data.get("hashtags") or []) if str(t).strip()]
