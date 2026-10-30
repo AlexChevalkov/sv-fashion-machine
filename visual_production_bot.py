@@ -3955,9 +3955,14 @@ def process_record(record: Dict[str, Any]) -> None:
 
     # POST PIPELINE (text-only slides). Single approval gate: it waits at
     # Brief Ready for the human to review the text, then renders on Approved Visual.
+    #
+    # 'Approved Text' is accepted as the same green light. A Post has no separate
+    # text-review gate, so that status can only arrive by hand — and because the
+    # bot fetches a single actionable record per run, a Post sitting on a status
+    # with no handler used to block the whole queue indefinitely.
     if is_post_job:
-        if status_value == STATUS_APPROVED:
-            print("DEBUG post action: Approved Visual -> render text slides")
+        if status_value in (STATUS_APPROVED, STATUS_APPROVED_TEXT):
+            print(f"DEBUG post action: {status_value} -> render text slides")
             try:
                 process_post_record(record)
             except Exception as post_error:
@@ -3970,7 +3975,30 @@ def process_record(record: Dict[str, Any]) -> None:
                     },
                 )
         else:
-            print(f"Post record waiting for text approval. Status: {status_value}")
+            # Any other status on a Post has no handler here. Leaving it alone
+            # would park it at the head of the queue forever, so send it back to
+            # the human gate instead — the Telegram bridge asks about
+            # 'Needs Visual Review', and answering "да" moves it to
+            # 'Approved Visual' and renders it.
+            print(
+                f"Post record on a status the post pipeline cannot act on "
+                f"({status_value}). Parking it at {STATUS_NEEDS_REVIEW} so it "
+                f"does not block the queue."
+            )
+            update_airtable_record(
+                record["id"],
+                {
+                    "Visual Status": STATUS_NEEDS_REVIEW,
+                    "Render Notes": append_note(
+                        safe_get(fields, "Render Notes", ""),
+                        f"""
+Status '{status_value}' is not part of the Post pipeline (a Post is approved
+once, at Brief Ready, and renders on '{STATUS_APPROVED}').
+Moved to '{STATUS_NEEDS_REVIEW}' at {now_iso()} so the queue keeps moving.
+""",
+                    ),
+                },
+            )
         return
 
     if is_reel_job:

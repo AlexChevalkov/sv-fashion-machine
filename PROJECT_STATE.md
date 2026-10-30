@@ -25,6 +25,11 @@
      - `Brief Ready` → keyframes → `Needs Visual Review`
      - `Approved Visual` → motion / assembly / text preview → `Needs Text Review`
      - `Approved Text` → final text / sound / cover / caption → `Ready for Buffer`
+   - Posts have ONE gate: approved at `Brief Ready`, rendered on `Approved Visual`.
+     `Approved Text` on a Post is accepted as the same green light. Any other
+     status on a Post is sent back to `Needs Visual Review` — the bot takes one
+     record per run, so a Post on an unhandled status would otherwise sit at the
+     head of the queue and stall everything behind it.
 
 5. `reel05_bot.py` — ветка «Рил 05», эксперимент.
    - Two entry points: `Visual Status = Reel 05` set by hand (for older posts),
