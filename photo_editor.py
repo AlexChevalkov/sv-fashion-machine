@@ -556,3 +556,41 @@ def find_photos(
     except Exception as exc:
         _log("find_photos failed:", repr(exc))
         return []
+
+
+def prepare_photo_from_url(
+    url: str,
+    out_path,
+    credit: str = "",
+    page: str = "",
+    with_credit: bool = False,
+    focus=(0.5, 0.4),
+) -> Optional[str]:
+    """
+    Привести ОДНУ картинку по ссылке к формату карточки поста.
+
+    Нужна в двух случаях:
+      - фото прислал владелец (своё изображение или ссылка из Телеграма) —
+        его ещё никто не обрезал и не подписал;
+      - готовое фото нужно забрать обратно с хостинга перед сборкой
+        карусели, уже обрезанное и подписанное, поэтому по умолчанию
+        подпись второй раз не ставится.
+
+    Возвращает путь к файлу или None, если картинку не удалось взять.
+    """
+    if not url:
+        return None
+
+    item = _download({"url": url, "page": page, "origin": "manual", "credit": credit})
+    if not item:
+        return None
+
+    canvas = crop_to_canvas(item["image"], focus)
+    if with_credit and credit:
+        canvas = draw_credit(canvas, credit)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path, format="JPEG", quality=92)
+    _log("prepared:", out_path.name, "from", url[:90])
+    return str(out_path)

@@ -21,8 +21,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # boto3 — чтобы выложить на хостинг картинку, присланную в Телеграме
+      # для обложки поста: ссылка Телеграма содержит токен бота и живёт
+      # недолго, а продакшн-бот забирает фото позже, на своём прогоне.
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests boto3
 
       - name: Run Telegram bridge
         env:
@@ -32,4 +35,9 @@ jobs:
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           AIRTABLE_TABLE_NAME: Content Inbox
           AIRTABLE_VISUAL_TABLE_NAME: Visual Jobs
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
         run: python telegram_bridge_bot.py
