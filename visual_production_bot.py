@@ -92,6 +92,13 @@ STATUS_READY_FOR_BUFFER = "Ready for Buffer"
 STATUS_REDO_SLIDES = "Redo Slides"
 STATUS_ERROR = "Failed"
 
+# Форматы поста: 'Post' — карточки с реальными фото по теме, 'Post Text' —
+# карточки только из текста на цветном фоне. Выбор делается при согласовании
+# темы в Телеграме и едет сюда в поле Format.
+POST_FORMAT_WITH_PHOTOS = "post"
+POST_FORMAT_TEXT_ONLY = "post text"
+POST_FORMATS = (POST_FORMAT_WITH_PHOTOS, POST_FORMAT_TEXT_ONLY)
+
 
 # =========================================================
 # HELPERS
@@ -257,7 +264,12 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
         "{Visual Status}='Brief Ready',"
         "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format})),"
         "{Format}!='Post',"
-        "{Chosen Format}!='Post'"
+        "{Chosen Format}!='Post',"
+        # 'Post Text' — тот же человеческий гейт, что и 'Post': ждём ответа
+        # в Телеграме. Без этой пары строк текстовый пост на 'Brief Ready'
+        # подхватывался бы здесь и уезжал в ветку карусели.
+        "{Format}!='Post Text',"
+        "{Chosen Format}!='Post Text'"
         ")"
         ")"
     )
@@ -3676,14 +3688,25 @@ def render_all_post_slides(slide_dir, title: str, body: str):
 
 def process_post_record(record: Dict[str, Any]) -> None:
     """
-    Text-only Post: render N colour-background text slides (no Krea, no video),
-    upload to R2 and push a carousel DRAFT to Buffer. Caption = full post text.
+    Post: render N colour-background slides (no Krea, no video), upload to R2
+    and push a carousel DRAFT to Buffer. Caption = full post text.
+
+    Format 'Post' puts real photos found for the topic on the cover and inside;
+    format 'Post Text' renders the same slides without any photos.
     """
     record_id = record["id"]
     fields = record.get("fields", {})
     existing_notes = safe_get(fields, "Render Notes", "")
 
-    print("Post Mode detected (text-only slides).")
+    post_format = (
+        safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
+    ).strip().lower()
+    wants_photos = post_format != POST_FORMAT_TEXT_ONLY
+
+    print(
+        "Post Mode detected. Format:", repr(post_format),
+        "— фото по теме" if wants_photos else "— только текст, без фото",
+    )
 
     update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
 
@@ -3703,19 +3726,22 @@ def process_post_record(record: Dict[str, Any]) -> None:
     ensure_dir(slide_dir)
 
     # Реальные фото по теме: первое — на обложку, ещё до двух — внутрь.
+    # Для формата 'Post Text' фото не ищем вообще — это осознанный выбор
+    # при согласовании темы, а не нехватка картинок.
     photos = []
-    try:
-        photos = find_photos(
-            title=safe_get(fields, "Job Title", "") or title,
-            text=body_text,
-            source_url=safe_get(fields, "Source URL", ""),
-            want=3,
-            out_dir=slide_dir / "photos",
-            model=ANTHROPIC_MODEL,
-        )
-    except Exception as photo_error:
-        print("Photo editor failed, rendering text-only:", repr(photo_error))
-        photos = []
+    if wants_photos:
+        try:
+            photos = find_photos(
+                title=safe_get(fields, "Job Title", "") or title,
+                text=body_text,
+                source_url=safe_get(fields, "Source URL", ""),
+                want=3,
+                out_dir=slide_dir / "photos",
+                model=ANTHROPIC_MODEL,
+            )
+        except Exception as photo_error:
+            print("Photo editor failed, rendering text-only:", repr(photo_error))
+            photos = []
 
     palette = pick_palette(safe_get(fields, "Post Color", ""), seed=record_id)
     slide_paths = render_post_carousel(
@@ -3726,11 +3752,14 @@ def process_post_record(record: Dict[str, Any]) -> None:
         palette=palette,
         brand=BRAND_NAME,
     )
-    photo_note = (
-        "Фото: " + ", ".join(f"{p['credit']} ({p['origin']})" for p in photos)
-        if photos
-        else "Фото не найдены — карусель только из текста."
-    )
+    if photos:
+        photo_note = "Фото: " + ", ".join(
+            f"{p['credit']} ({p['origin']})" for p in photos
+        )
+    elif wants_photos:
+        photo_note = "Фото не найдены — карусель только из текста."
+    else:
+        photo_note = "Формат «Post Text» — карточки только из текста, фото не искали."
 
     ok, info = publish_draft_to_buffer(
         record_id,
@@ -3951,7 +3980,11 @@ def process_record(record: Dict[str, Any]) -> None:
     print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
 
        # REEL PIPELINE
-    is_post_job = (format_value == "post")
+    # Пост бывает двух видов, выбор делается при согласовании темы в Телеграме:
+    #   'Post'      — карточки с реальными фото по теме;
+    #   'Post Text' — карточки только из текста на цветном фоне.
+    # Ветка сборки одна, различие — ищем ли иллюстрации.
+    is_post_job = format_value in POST_FORMATS
 
     # POST PIPELINE (text-only slides). Single approval gate: it waits at
     # Brief Ready for the human to review the text, then renders on Approved Visual.

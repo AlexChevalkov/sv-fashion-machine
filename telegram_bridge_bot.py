@@ -123,6 +123,55 @@ def format_of(fields: dict) -> str:
     return (sel(fields, "Format") or sel(fields, "Chosen Format")).strip().lower()
 
 
+# Пост существует в двух видах, и выбираются они при согласовании темы:
+#   «Post»      — карточки с реальными фото по теме (так делается сейчас);
+#   «Post Text» — только текст на цветном фоне (как делалось раньше).
+# Для всей цепочки это один и тот же пост: одинаковый гейт, одинаковый бриф,
+# одинаковая сборка. Разница только в том, ищет ли продакшн-бот иллюстрации.
+POST_FORMATS = ("post", "post text")
+
+
+def is_post_format(value: str) -> bool:
+    return (value or "").strip().lower() in POST_FORMATS
+
+
+# Отклонённая визуальная работа уходит в 'Failed'. Раньше отказ не менял
+# статус вообще: бот отвечал «Отклонено», запись оставалась в 'Brief Ready'
+# или 'Needs Visual Review' и жила в разделах Queued / Review вечно — так
+# там с августа накопилось 26 записей.
+REJECTED_VISUAL_STATUS = "Failed"
+
+
+def reject_visual(record_id: str, fields: dict, stage: str) -> str:
+    """
+    Увести отклонённую визуальную работу из актуальных разделов.
+
+    Карточка уходит в 'Failed', а тема в Content Inbox помечается 'Rejected',
+    чтобы всё отклонённое лежало в одном списке. Тему, которая уже дошла до
+    Buffer, не трогаем: там отказ относится к доработке, а не к публикации.
+    """
+    stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    note = sel(fields, "Render Notes").strip()
+    reject_note = f"Отклонено в Телеграме на этапе «{stage}» {stamp}."
+    at_update(VISUAL_TABLE, record_id, {
+        "Visual Status": REJECTED_VISUAL_STATUS,
+        "Render Notes": (note + "\n\n---\n\n" + reject_note) if note else reject_note,
+    })
+
+    answer = f"❌ Отклонено → {REJECTED_VISUAL_STATUS}. Из актуальных разделов убрал."
+
+    source_id = sel(fields, "Source Content ID").strip()
+    if source_id.startswith("rec"):
+        topic = at_get(CONTENT_TABLE, source_id)
+        if isinstance(topic, dict):
+            topic_status = sel(topic.get("fields", {}), "Status")
+            if topic_status not in ("Rejected", "Sent to Buffer"):
+                at_update(CONTENT_TABLE, source_id, {"Status": "Rejected"})
+                answer += " Тему тоже пометил отклонённой."
+
+    return answer
+
+
 # ------------------------------------------------------- apply a decision ---
 
 def apply_decision(decision: str, table_key: str, record_id: str) -> str:
@@ -140,7 +189,12 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
         status = sel(fields, "Status")
         if status != "Needs Review":
             return f"Уже обработано (статус: {status})."
-        format_map = {"post": "Post", "reel": "Reel Idea", "carousel": "Carousel"}
+        format_map = {
+            "post": "Post",
+            "post_text": "Post Text",
+            "reel": "Reel Idea",
+            "carousel": "Carousel",
+        }
         if decision in format_map:
             chosen = format_map[decision]
             at_update(table, record_id, {"Status": "Approved", "Format": chosen})
@@ -156,14 +210,14 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
 
     if status == "Brief Ready":
         if decision in ("y", "y+reel05"):
-            target = "Approved Visual" if fmt == "post" else "Prompts Approved"
+            target = "Approved Visual" if is_post_format(fmt) else "Prompts Approved"
             fields_to_write = {"Visual Status": target}
 
             # Текстовый рилс собирается из готового текста поста, поэтому
             # здесь только отмечаем намерение: reel05_bot заберёт карточку
             # сам, когда пост дособран.
             if decision == "y+reel05":
-                if fmt != "post":
+                if not is_post_format(fmt):
                     return ("Текстовый рилс делается только из постов. "
                             "Ответь «да», чтобы просто утвердить.")
                 fields_to_write[REEL05_FIELD] = True
@@ -173,7 +227,7 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
             if decision == "y+reel05":
                 return f"✅ Утверждено → {target}. После поста соберу текстовый рилс."
             return f"✅ Утверждено → {target}."
-        return "❌ Отклонено. Поправь тексты/промпты в Airtable."
+        return reject_visual(record_id, fields, "готовые тексты")
 
     if status == "Needs Visual Review":
         if decision == "y":
@@ -193,7 +247,7 @@ def apply_decision(decision: str, table_key: str, record_id: str) -> str:
                 f"🔁 Перерисую слайды {slides.replace(',', ', ')}. "
                 f"Остальные остаются как есть — пришлю новую карточку."
             )
-        return "❌ Отклонено. Поправь визуал в Airtable."
+        return reject_visual(record_id, fields, "готовый визуал")
 
     return f"Уже обработано (статус: {status})."
 
@@ -204,6 +258,12 @@ TAG_RE = re.compile(r"\[(c|v):(rec[A-Za-z0-9]{14})\]")
 
 CONTENT_WORDS = {
     "пост": "post", "post": "post",
+    # Пост без иллюстраций — только текст на цветном фоне. Ответ приходит
+    # уже со схлопнутыми пробелами вокруг «+», поэтому «пост + текст»
+    # и «пост+текст» попадают в один ключ.
+    "текст": "post_text", "пост+текст": "post_text",
+    "пост текст": "post_text", "текстовый пост": "post_text",
+    "пост без фото": "post_text", "без фото": "post_text",
     "рилс": "reel", "рил": "reel", "reel": "reel",
     "карусель": "carousel", "carousel": "carousel",
     "да": "y", "yes": "y", "ок": "y", "ok": "y", "+": "y",
@@ -274,7 +334,7 @@ def handle_text_reply(msg: dict) -> None:
     chat_id = msg.get("chat", {}).get("id")
     if not decision:
         options = (
-            "пост / рилс / карусель / нет" if table_key == "content"
+            "пост / текст / рилс / карусель / нет" if table_key == "content"
             else "да / нет / номера слайдов на переделку (например: 2 5)"
         )
         tg("sendMessage", chat_id=chat_id,
@@ -485,8 +545,10 @@ def notify_pending(content_records: list, visual_records: list) -> int:
             score_block = f"🎯 Потенциал хука: {int(score)}/10\n{evidence}\n\n"
         text = (
             f"🆕 Новая тема на согласование\n\n{title}\n\n{score_block}{hook}\n\n{caption}\n\n"
-            f"💬 Ответь на ЭТО сообщение одним словом (свайп → «Ответить»):\n"
-            f"пост / рилс / карусель / нет\n\n"
+            f"💬 Ответь на ЭТО сообщение (свайп → «Ответить»):\n"
+            f"пост — карточки с фото по теме\n"
+            f"текст — карточки только из текста, без фото\n"
+            f"рилс / карусель / нет\n\n"
             f"[c:{rid}]"
         )
         send_card(text)
@@ -502,7 +564,7 @@ def notify_pending(content_records: list, visual_records: list) -> int:
         fmt = format_of(fields)
 
         # Carousel "Brief Ready" is auto-processed — not a human gate.
-        if status == "Brief Ready" and not ("reel" in fmt or fmt == "post"):
+        if status == "Brief Ready" and not ("reel" in fmt or is_post_format(fmt)):
             continue
         fingerprint = gate_fingerprint(fields, status)
         if sel(fields, NOTIFIED_FIELD) == fingerprint:
@@ -518,7 +580,7 @@ def notify_pending(content_records: list, visual_records: list) -> int:
             preview = (sel(fields, "Final Reel Caption") or sel(fields, "Slide Copy") or "")[:600]
             # Текстовый рилс собирается из текста поста, поэтому предлагается
             # только постам и только здесь — раньше текста ещё нет.
-            if fmt == "post":
+            if is_post_format(fmt):
                 footer = (
                     f"💬 Ответь на ЭТО сообщение (свайп → «Ответить»):\n"
                     f"да — только карточки\n"

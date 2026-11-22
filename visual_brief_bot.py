@@ -184,7 +184,9 @@ def generate_visual_brief(job_fields: dict, post_fields: dict) -> dict:
         or "Reel + Carousel"
     )
 
-    is_post = str(chosen_format).strip().lower() == "post"
+    # «Post» и «Post Text» — один и тот же бриф: разница появляется только
+    # на сборке, где текстовому посту не ищут иллюстрации.
+    is_post = str(chosen_format).strip().lower() in ("post", "post text")
 
     post_block = ""
     if is_post:
