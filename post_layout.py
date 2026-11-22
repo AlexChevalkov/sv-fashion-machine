@@ -360,23 +360,22 @@ def render_photo_slide(photo_path, brand, n, total) -> Image.Image:
     return img.convert("RGB")
 
 
-def render_post_carousel(
-    out_dir,
+def plan_post_carousel(
     title: str,
     body: str,
     photos: Optional[List[Dict]] = None,
-    palette: str = "green",
-    brand: str = "SV FASHION MEDIA",
-) -> List[str]:
+) -> Dict:
     """
-    Собрать карусель поста. photos — результат photo_editor.find_photos().
-    Порядок: обложка (фото+заголовок или цветная), текстовые карточки,
-    между ними фото-карточки. Возвращает пути к PNG по порядку.
+    Разложить пост по карточкам, ничего не рисуя.
+
+    Вынесено из render_post_carousel, чтобы обложку можно было нарисовать
+    отдельно — для показа в Телеграме до полной сборки — и чтобы она в
+    точности совпала с той, что потом уйдёт в карусель: тот же заголовок,
+    то же фото, тот же номер «1/N».
+
+    Возвращает {"title", "body", "cover_photo", "order", "size", "total"}.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     photos = [p for p in (photos or []) if p.get("path")]
-    palette = palette if palette in PALETTES else "green"
 
     title = strip_emoji(title)
     body = strip_emoji(body)
@@ -415,6 +414,73 @@ def render_post_carousel(
                 order.append(("photo", path))
         order.append(("text", paragraphs))
 
+    return {
+        "title": title,
+        "body": body,
+        "cover_photo": cover_photo,
+        "order": order,
+        "size": size,
+        "total": len(order),
+    }
+
+
+def render_post_cover(
+    out_dir,
+    title: str,
+    body: str,
+    photos: Optional[List[Dict]] = None,
+    palette: str = "green",
+    brand: str = "SV FASHION MEDIA",
+) -> str:
+    """
+    Нарисовать ТОЛЬКО обложку поста — ту самую, что встанет первой карточкой.
+
+    Нужна, чтобы показать её в Телеграме вместе с текстами и дать заменить
+    фото до того, как собрана вся карусель и создан черновик в Buffer.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    palette = palette if palette in PALETTES else "green"
+
+    plan = plan_post_carousel(title, body, photos)
+    cover_photo, total = plan["cover_photo"], plan["total"]
+
+    img = (
+        render_photo_cover(cover_photo, plan["title"], brand, total)
+        if cover_photo
+        else render_text_cover(plan["title"], palette, brand, total)
+    )
+    path = out_dir / "post_cover_preview.png"
+    img.save(path, format="PNG")
+    print(
+        f"[post_layout] cover preview: {'фото' if cover_photo else 'без фото'}, "
+        f"карточек всего {total}"
+    )
+    return str(path)
+
+
+def render_post_carousel(
+    out_dir,
+    title: str,
+    body: str,
+    photos: Optional[List[Dict]] = None,
+    palette: str = "green",
+    brand: str = "SV FASHION MEDIA",
+) -> List[str]:
+    """
+    Собрать карусель поста. photos — результат photo_editor.find_photos().
+    Порядок: обложка (фото+заголовок или цветная), текстовые карточки,
+    между ними фото-карточки. Возвращает пути к PNG по порядку.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    palette = palette if palette in PALETTES else "green"
+
+    plan = plan_post_carousel(title, body, photos)
+    title, body = plan["title"], plan["body"]
+    cover_photo, order, size = plan["cover_photo"], plan["order"], plan["size"]
+    text_slides = [payload for kind, payload in order if kind == "text"]
+
     total = len(order)
     paths = []
     for n, (kind, payload) in enumerate(order, start=1):
@@ -431,6 +497,7 @@ def render_post_carousel(
         path = out_dir / f"post_slide_{n:02d}.png"
         img.save(path, format="PNG")
         paths.append(str(path))
+    inline_photos = sum(1 for kind, _ in order if kind == "photo")
     print(f"[post_layout] {total} slides (text {len(text_slides)}, body {size}px, palette {palette}, "
-          f"cover {'photo' if cover_photo else 'text'}, inline photos {len(inline)})")
+          f"cover {'photo' if cover_photo else 'text'}, inline photos {inline_photos})")
     return paths

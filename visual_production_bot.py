@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from r2_storage import r2_is_configured, upload_file_to_r2
 from buffer_publish import buffer_is_configured, create_instagram_draft
-from photo_editor import find_photos
-from post_layout import pick_palette, render_post_carousel
+from photo_editor import find_photos, prepare_photo_from_url
+from post_layout import pick_palette, render_post_carousel, render_post_cover
 
 
 # =========================================================
@@ -92,6 +92,13 @@ STATUS_READY_FOR_BUFFER = "Ready for Buffer"
 STATUS_REDO_SLIDES = "Redo Slides"
 STATUS_ERROR = "Failed"
 
+# Форматы поста: 'Post' — карточки с реальными фото по теме, 'Post Text' —
+# карточки только из текста на цветном фоне. Выбор делается при согласовании
+# темы в Телеграме и едет сюда в поле Format.
+POST_FORMAT_WITH_PHOTOS = "post"
+POST_FORMAT_TEXT_ONLY = "post text"
+POST_FORMATS = (POST_FORMAT_WITH_PHOTOS, POST_FORMAT_TEXT_ONLY)
+
 
 # =========================================================
 # HELPERS
@@ -154,6 +161,23 @@ def mirror_to_r2(local_path: Any, key: str, fallback_url: str) -> str:
     except Exception as exc:
         print("R2 upload failed, falling back to original URL. Error:", repr(exc))
         return fallback_url
+
+
+def upload_to_r2_public(local_path: Any, key: str) -> str:
+    """
+    Выложить локальный файл на хостинг и вернуть постоянную ссылку.
+
+    В отличие от mirror_to_r2 запасной ссылки здесь нет: файл сделан у нас,
+    и если он не выложился, то показывать нечего. Возвращает пустую строку.
+    """
+    if not r2_is_configured():
+        print("Хостинг не настроен — ссылку получить негде.")
+        return ""
+    try:
+        return upload_file_to_r2(str(local_path), key)
+    except Exception as exc:
+        print("Загрузка на хостинг не удалась:", repr(exc))
+        return ""
 
 
 def safe_get(fields: Dict[str, Any], key: str, default: str = "") -> str:
@@ -253,11 +277,30 @@ def get_queued_visual_jobs(limit: int = 1) -> List[Dict[str, Any]]:
         "{Visual Status}='Approved Visual',"
         "{Visual Status}='Approved Text',"
         "{Visual Status}='Redo Slides',"
+        # Пост с фото на 'Brief Ready', у которого обложка ещё не собрана:
+        # находим фото, рисуем обложку и оставляем запись на том же статусе.
+        # Карточку с обложкой присылает телеграм-мост, решение по-прежнему
+        # за человеком. Как только обложка готова, запись перестаёт быть
+        # актуальной для бота и просто ждёт ответа.
+        "AND("
+        "{Visual Status}='Brief Ready',"
+        "OR({Format}='Post',{Chosen Format}='Post'),"
+        "{Cover Preview URL}='',"
+        # Только свежие брифы. Иначе бот полез бы искать фото для всего
+        # старого, что годами ждёт ответа на этом гейте, и завалил бы
+        # Телеграм карточками по темам, которые давно неактуальны.
+        "IS_AFTER(CREATED_TIME(), DATEADD(TODAY(), -7, 'days'))"
+        "),"
         "AND("
         "{Visual Status}='Brief Ready',"
         "NOT(FIND('Reel', {Format} & ' ' & {Chosen Format})),"
         "{Format}!='Post',"
-        "{Chosen Format}!='Post'"
+        "{Chosen Format}!='Post',"
+        # 'Post Text' — тот же человеческий гейт, что и 'Post': ждём ответа
+        # в Телеграме. Без этой пары строк текстовый пост на 'Brief Ready'
+        # подхватывался бы здесь и уезжал в ветку карусели.
+        "{Format}!='Post Text',"
+        "{Chosen Format}!='Post Text'"
         ")"
         ")"
     )
@@ -3674,48 +3717,242 @@ def render_all_post_slides(slide_dir, title: str, body: str):
     return slide_paths
 
 
-def process_post_record(record: Dict[str, Any]) -> None:
+def post_format_of(fields: Dict[str, Any]) -> str:
+    return (
+        safe_get(fields, "Format") or safe_get(fields, "Chosen Format")
+    ).strip().lower()
+
+
+def split_post_title_body(fields: Dict[str, Any], caption: str):
     """
-    Text-only Post: render N colour-background text slides (no Krea, no video),
-    upload to R2 and push a carousel DRAFT to Buffer. Caption = full post text.
+    Разложить текст поста на заголовок обложки и тело.
+
+    Общий код для превью обложки и для сборки карусели: иначе в Телеграме
+    можно было бы увидеть одну обложку, а в Buffer получить другую.
+    """
+    body_text = strip_trailing_hashtags(caption)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body_text) if p.strip()]
+    if len(paragraphs) >= 2:
+        return paragraphs[0], "\n\n".join(paragraphs[1:]), body_text
+    title = safe_get(fields, "Job Title", "") or (paragraphs[0] if paragraphs else "")
+    return title, body_text, body_text
+
+
+def format_photo_candidates(photos: List[Dict[str, str]]) -> str:
+    """Список найденных фото для Airtable: «номер. ссылка | источник»."""
+    lines = []
+    for n, photo in enumerate(photos, start=1):
+        credit = (photo.get("credit") or "").strip()
+        lines.append(f"{n}. {photo['url']}" + (f" | {credit}" if credit else ""))
+    return "\n".join(lines)
+
+
+def parse_photo_candidates(raw: str) -> List[Dict[str, str]]:
+    """Разобрать поле Photo Candidates обратно в список {"url", "credit"}."""
+    candidates = []
+    for line in (raw or "").splitlines():
+        match = re.match(r"^\s*\d+\.\s*(\S+)\s*(?:\|\s*(.*))?$", line)
+        if not match:
+            continue
+        url = match.group(1).strip()
+        if url.startswith("http"):
+            candidates.append({"url": url, "credit": (match.group(2) or "").strip()})
+    return candidates
+
+
+def fetch_post_photos(
+    fields: Dict[str, Any], out_dir: Path
+) -> List[Dict[str, str]]:
+    """
+    Собрать фото для карусели из того, что уже выбрано в Airtable.
+
+    Обложка — из 'Cover Photo URL' (владелец мог заменить её в Телеграме),
+    остальные — из 'Photo Candidates' в их порядке. Файлы на хостинге уже
+    обрезаны и подписаны, поэтому подпись второй раз не ставим.
+    """
+    candidates = parse_photo_candidates(safe_get(fields, "Photo Candidates", ""))
+    cover_url = safe_get(fields, "Cover Photo URL", "").strip()
+
+    ordered = []
+    if cover_url:
+        cover_credit = next(
+            (c["credit"] for c in candidates if c["url"] == cover_url), ""
+        )
+        ordered.append({"url": cover_url, "credit": cover_credit})
+    ordered += [c for c in candidates if c["url"] != cover_url]
+
+    photos = []
+    for n, item in enumerate(ordered[:3], start=1):
+        path = prepare_photo_from_url(
+            item["url"], out_dir / f"photo_{n:02d}.jpg", credit=item["credit"]
+        )
+        if path:
+            photos.append({"path": path, "credit": item["credit"], "origin": "выбрано"})
+        else:
+            print("Фото не удалось забрать с хостинга:", item["url"][:100])
+            # Обложку заменить нечем — дальше без фото, чем с чужой обложкой.
+            if n == 1:
+                return []
+    return photos
+
+
+def process_post_cover_preview(record: Dict[str, Any]) -> None:
+    """
+    Собрать обложку поста и показать её ДО полной сборки карусели.
+
+    Статус остаётся 'Brief Ready': карточку с картинкой присылает
+    телеграм-мост, решение по-прежнему принимает человек. Ссылка на обложку
+    дублируется в 'Output Links' — по нему мост понимает, что карточку надо
+    прислать заново, когда обложка сменилась.
     """
     record_id = record["id"]
     fields = record.get("fields", {})
     existing_notes = safe_get(fields, "Render Notes", "")
 
-    print("Post Mode detected (text-only slides).")
+    caption = pick_post_caption(fields)
+    title, body, body_text = split_post_title_body(fields, caption)
+
+    work_dir = OUTPUT_DIR / record_id / "cover"
+    ensure_dir(work_dir)
+
+    candidates = parse_photo_candidates(safe_get(fields, "Photo Candidates", ""))
+    chosen_cover = safe_get(fields, "Cover Photo URL", "").strip()
+
+    if candidates or chosen_cover:
+        # Фото уже искали — владелец просто сменил обложку. Второй раз
+        # не ищем: это и деньги, и другой набор картинок.
+        print("Фото уже найдены ранее, беру выбранное:", chosen_cover[:100] or "первое")
+        photos = fetch_post_photos(fields, work_dir / "photos")
+    else:
+        print("Ищу фото по теме для обложки.")
+        found = []
+        try:
+            found = find_photos(
+                title=safe_get(fields, "Job Title", "") or title,
+                text=body_text,
+                source_url=safe_get(fields, "Source URL", ""),
+                want=3,
+                out_dir=work_dir / "photos",
+                model=ANTHROPIC_MODEL,
+            )
+        except Exception as photo_error:
+            print("Фоторедактор не справился:", repr(photo_error))
+
+        photos = []
+        for n, photo in enumerate(found, start=1):
+            url = upload_to_r2_public(
+                photo["path"],
+                f"{build_job_r2_folder(record)}/photo_{n:02d}_{int(time.time())}.jpg",
+            )
+            if not url:
+                print(f"Фото {n} не загрузилось на хостинг, пропускаю.")
+                continue
+            photos.append({**photo, "url": url})
+
+        candidates = [
+            {"url": p["url"], "credit": p.get("credit", "")} for p in photos
+        ]
+        chosen_cover = candidates[0]["url"] if candidates else ""
+
+    palette = pick_palette(safe_get(fields, "Post Color", ""), seed=record_id)
+    cover_path = render_post_cover(
+        work_dir, title, body, photos=photos, palette=palette, brand=BRAND_NAME,
+    )
+
+    preview_url = upload_to_r2_public(
+        cover_path,
+        f"{build_job_r2_folder(record)}/cover_preview_{int(time.time())}.png",
+    )
+    if not preview_url:
+        # Без ссылки картинку в Телеграм не отправить. Бросаем — вызывающий
+        # уводит запись с актуального статуса, иначе она встанет в голову
+        # очереди и будет выбираться каждый прогон, блокируя остальное.
+        raise RuntimeError("обложка не выложилась на хостинг")
+
+    photo_note = (
+        f"Обложка: {photos[0].get('credit') or 'без подписи'}"
+        if photos
+        else "Фото по теме не нашлись — обложка текстовая."
+    )
+    update_airtable_record(record_id, {
+        "Cover Preview URL": preview_url,
+        "Cover Photo URL": chosen_cover,
+        "Photo Candidates": format_photo_candidates(candidates),
+        "Output Links": append_note(
+            safe_get(fields, "Output Links", ""),
+            f"Cover preview: {preview_url}",
+        ),
+        "Render Notes": append_note(
+            existing_notes,
+            f"""
+Обложка собрана для показа в Телеграме в {now_iso()}.
+Найдено фото: {len(candidates)}. {photo_note}
+Статус остался 'Brief Ready' — жду ответа.
+""",
+        ),
+    })
+    print("Cover preview ready:", preview_url)
+
+
+def process_post_record(record: Dict[str, Any]) -> None:
+    """
+    Post: render N colour-background slides (no Krea, no video), upload to R2
+    and push a carousel DRAFT to Buffer. Caption = full post text.
+
+    Format 'Post' puts real photos found for the topic on the cover and inside;
+    format 'Post Text' renders the same slides without any photos.
+    """
+    record_id = record["id"]
+    fields = record.get("fields", {})
+    existing_notes = safe_get(fields, "Render Notes", "")
+
+    post_format = post_format_of(fields)
+    wants_photos = post_format != POST_FORMAT_TEXT_ONLY
+
+    print(
+        "Post Mode detected. Format:", repr(post_format),
+        "— фото по теме" if wants_photos else "— только текст, без фото",
+    )
 
     update_airtable_record(record_id, {"Visual Status": STATUS_RENDERING})
 
     caption = pick_post_caption(fields)
 
     # Slide 1 title = the post's opening line (hook); the rest is the body text.
-    body_text = strip_trailing_hashtags(caption)
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", body_text) if p.strip()]
-    if len(paragraphs) >= 2:
-        title = paragraphs[0]
-        body = "\n\n".join(paragraphs[1:])
-    else:
-        title = safe_get(fields, "Job Title", "") or (paragraphs[0] if paragraphs else "")
-        body = body_text
+    title, body, body_text = split_post_title_body(fields, caption)
 
     slide_dir = OUTPUT_DIR / record_id / "post"
     ensure_dir(slide_dir)
 
-    # Реальные фото по теме: первое — на обложку, ещё до двух — внутрь.
+    # Фото: первое — на обложку, ещё до двух — внутрь.
+    #
+    # Обычно они уже выбраны на шаге обложки, и владелец видел и утвердил
+    # именно их — поэтому берём готовое с хостинга и НЕ ищем заново, иначе
+    # в Buffer уехала бы не та обложка, которую он согласовал.
+    #
+    # Для формата 'Post Text' фото не нужны вовсе — это осознанный выбор при
+    # согласовании темы, а не нехватка картинок.
     photos = []
-    try:
-        photos = find_photos(
-            title=safe_get(fields, "Job Title", "") or title,
-            text=body_text,
-            source_url=safe_get(fields, "Source URL", ""),
-            want=3,
-            out_dir=slide_dir / "photos",
-            model=ANTHROPIC_MODEL,
-        )
-    except Exception as photo_error:
-        print("Photo editor failed, rendering text-only:", repr(photo_error))
-        photos = []
+    if wants_photos:
+        photos = fetch_post_photos(fields, slide_dir / "photos")
+        if photos:
+            print(f"Беру {len(photos)} уже выбранных фото.")
+        else:
+            # Обложку не собирали (старая запись, ручной перевод статуса)
+            # или файлы не отдались — ищем на месте, как раньше.
+            print("Готовых фото нет, ищу по теме.")
+            try:
+                photos = find_photos(
+                    title=safe_get(fields, "Job Title", "") or title,
+                    text=body_text,
+                    source_url=safe_get(fields, "Source URL", ""),
+                    want=3,
+                    out_dir=slide_dir / "photos",
+                    model=ANTHROPIC_MODEL,
+                )
+            except Exception as photo_error:
+                print("Photo editor failed, rendering text-only:", repr(photo_error))
+                photos = []
 
     palette = pick_palette(safe_get(fields, "Post Color", ""), seed=record_id)
     slide_paths = render_post_carousel(
@@ -3726,11 +3963,14 @@ def process_post_record(record: Dict[str, Any]) -> None:
         palette=palette,
         brand=BRAND_NAME,
     )
-    photo_note = (
-        "Фото: " + ", ".join(f"{p['credit']} ({p['origin']})" for p in photos)
-        if photos
-        else "Фото не найдены — карусель только из текста."
-    )
+    if photos:
+        photo_note = "Фото: " + ", ".join(
+            f"{p['credit']} ({p['origin']})" for p in photos
+        )
+    elif wants_photos:
+        photo_note = "Фото не найдены — карусель только из текста."
+    else:
+        photo_note = "Формат «Post Text» — карточки только из текста, фото не искали."
 
     ok, info = publish_draft_to_buffer(
         record_id,
@@ -3951,7 +4191,11 @@ def process_record(record: Dict[str, Any]) -> None:
     print("DEBUG ROUTING output_has_motion:", "reel motion clips generated" in output_links_value.lower())
 
        # REEL PIPELINE
-    is_post_job = (format_value == "post")
+    # Пост бывает двух видов, выбор делается при согласовании темы в Телеграме:
+    #   'Post'      — карточки с реальными фото по теме;
+    #   'Post Text' — карточки только из текста на цветном фоне.
+    # Ветка сборки одна, различие — ищем ли иллюстрации.
+    is_post_job = format_value in POST_FORMATS
 
     # POST PIPELINE (text-only slides). Single approval gate: it waits at
     # Brief Ready for the human to review the text, then renders on Approved Visual.
@@ -3961,7 +4205,37 @@ def process_record(record: Dict[str, Any]) -> None:
     # bot fetches a single actionable record per run, a Post sitting on a status
     # with no handler used to block the whole queue indefinitely.
     if is_post_job:
-        if status_value in (STATUS_APPROVED, STATUS_APPROVED_TEXT):
+        if (
+            status_value == STATUS_BRIEF_READY
+            and format_value == POST_FORMAT_WITH_PHOTOS
+        ):
+            # Обложку собираем ДО полной сборки, чтобы владелец увидел её
+            # в Телеграме и успел заменить фото. Статус не меняем: это
+            # по-прежнему тот же человеческий гейт.
+            print("DEBUG post action: Brief Ready -> собираю обложку для показа")
+            try:
+                process_post_cover_preview(record)
+            except Exception as cover_error:
+                # Запись уводим с актуального статуса: бот берёт по одной
+                # записи за прогон, и падающая на 'Brief Ready' встала бы
+                # в голову очереди навсегда. На 'Needs Visual Review' о ней
+                # спросит телеграм-мост, а ответ «да» соберёт пост как
+                # раньше — с поиском фото прямо на сборке.
+                print("Cover preview failed:", repr(cover_error))
+                update_airtable_record(
+                    record["id"],
+                    {
+                        "Visual Status": STATUS_NEEDS_REVIEW,
+                        "Render Notes": append_note(
+                            safe_get(fields, "Render Notes", ""),
+                            f"Обложку собрать не удалось в {now_iso()}:\n"
+                            f"{repr(cover_error)}\n"
+                            f"Перевёл на '{STATUS_NEEDS_REVIEW}', чтобы не держать "
+                            f"очередь. Ответ «да» соберёт пост обычным путём.",
+                        ),
+                    },
+                )
+        elif status_value in (STATUS_APPROVED, STATUS_APPROVED_TEXT):
             print(f"DEBUG post action: {status_value} -> render text slides")
             try:
                 process_post_record(record)
